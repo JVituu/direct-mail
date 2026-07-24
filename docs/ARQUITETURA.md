@@ -1,0 +1,114 @@
+# Arquitetura
+
+Este projeto usa uma separação inspirada em Clean Architecture para manter a regra de negócio simples, testável e independente da interface gráfica ou do banco de dados.
+
+## Regra de dependência
+
+As dependências devem apontar para dentro:
+
+```text
+presentation -> application -> domain
+infrastructure -> application -> domain
+```
+
+A camada `domain` não deve importar nada de PySide6, pandas, openpyxl, SQLite ou PyInstaller.
+
+## Fluxo principal
+
+```text
+Tela PySide6
+  -> ViewModel/Controller
+  -> Caso de uso
+  -> Contrato de repositório
+  -> Implementação SQLite ou leitor XLSX
+```
+
+## Camada domain
+
+Responsabilidade:
+
+- Representar conceitos centrais do negócio.
+- Definir entidades como convidado, lista de convidados e seleção.
+- Definir contratos de repositório quando eles forem parte do negócio.
+- Validar regras que não dependem de tela, banco ou planilha.
+
+Não deve conter:
+
+- Código de PySide6.
+- Código de pandas/openpyxl.
+- SQL.
+- Caminhos de arquivos.
+
+## Camada application
+
+Responsabilidade:
+
+- Orquestrar os casos de uso.
+- Receber dados da interface.
+- Chamar contratos de repositório.
+- Retornar dados simples para a interface.
+
+Casos de uso previstos:
+
+- Importar planilha.
+- Listar convidados importados.
+- Selecionar convidados.
+- Criar lista final de convidados.
+- Consultar listas salvas.
+
+## Camada infrastructure
+
+Responsabilidade:
+
+- Implementar leitura de arquivos `XLSX`.
+- Implementar persistência em SQLite.
+- Implementar repositórios concretos.
+- Isolar detalhes técnicos externos das camadas internas.
+
+Bibliotecas esperadas nesta camada:
+
+- `sqlite3`
+- `pandas`
+- `openpyxl`
+
+## Camada presentation
+
+Responsabilidade:
+
+- Construir telas PySide6.
+- Coletar ações do usuário.
+- Exibir dados retornados pelos casos de uso.
+- Mostrar mensagens de erro ou sucesso.
+
+Não deve conter:
+
+- SQL.
+- Transformação pesada de planilha.
+- Regra de seleção de convidados.
+- Decisão de persistência.
+
+## Camada shared
+
+Responsabilidade:
+
+- Centralizar erros compartilhados.
+- Centralizar pequenas funções utilitárias realmente comuns.
+
+Essa camada deve ser usada com cuidado para não virar uma pasta genérica demais.
+
+## Banco de dados
+
+O SQLite será usado como banco local da aplicação. A interface gráfica não deve acessar o banco diretamente. Todo acesso ao banco deve passar por casos de uso e repositórios.
+
+## Planilhas
+
+A leitura de planilhas deve ficar isolada em `app/infrastructure/spreadsheet`. Assim, se no futuro a leitura mudar de pandas para openpyxl puro, a regra de negócio não será afetada.
+
+## Testes
+
+Estratégia recomendada:
+
+- Testes de domínio para regras puras.
+- Testes de aplicação para casos de uso.
+- Testes de infraestrutura para SQLite e leitura de planilhas.
+- Testes manuais ou automatizados específicos para a interface PySide6.

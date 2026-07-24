@@ -1,20 +1,20 @@
-# Mala Direta
+# Direct-Mail
 
-Aplicativo desktop para importar arquivos `XLSX`, visualizar convidados e montar uma nova lista apenas com os convidados selecionados pelo usuário.
+Desktop application for importing `XLSX` files, viewing guests, and creating a new list containing only the guests selected by the user.
 
-## Objetivo
+## Objective
 
-O sistema deve permitir que o usuário:
+The system must allow the user to:
 
-1. Importe uma planilha `XLSX`.
-2. Visualize os convidados encontrados na planilha.
-3. Selecione convidados específicos.
-4. Crie uma nova lista com os convidados selecionados.
-5. Persista os dados localmente em SQLite.
+1. Import an `XLSX` spreadsheet.
+2. View the guests found in the spreadsheet.
+3. Select specific guests.
+4. Create a new list with the selected guests.
+5. Persist the data locally in SQLite.
 
-## Arquitetura
+## Architecture
 
-O projeto segue uma organização inspirada em Clean Architecture. A regra principal é manter as regras de negócio independentes de interface gráfica, banco de dados e bibliotecas externas.
+The project follows an organizational structure inspired by Clean Architecture. The main principle is to keep business rules independent of the graphical interface, database, and external libraries.
 
 ```text
 app/
@@ -42,38 +42,39 @@ docs/
 tests/
 ```
 
-### Camadas
+
+### Layers
 
 `domain`
-: Contém as entidades, objetos de valor e contratos centrais do negócio. Não deve depender de PySide6, pandas, openpyxl, SQLite ou qualquer detalhe externo.
+: Contains the business’s core entities, value objects, and contracts. It should not depend on PySide6, pandas, openpyxl, SQLite, or any external details.
 
 `application`
-: Contém os casos de uso do sistema, como importar planilha, listar convidados, selecionar convidados e criar listas selecionadas.
+: Contains the system’s use cases, such as importing spreadsheets, listing guests, selecting guests, and creating shortlists.
 
 `infrastructure`
-: Contém implementações técnicas, como persistência em SQLite, leitura de planilhas com pandas/openpyxl e repositórios concretos.
+: Contains technical implementations, such as SQLite persistence, reading spreadsheets with pandas/openpyxl, and concrete repositories.
 
 `presentation`
-: Contém a interface desktop feita com PySide6. Essa camada chama os casos de uso, mas não deve concentrar regra de negócio.
+: Contains the desktop interface built with PySide6. This layer calls the use cases but should not contain business rules.
 
 `shared`
-: Contém utilitários e erros compartilhados que não pertencem exclusivamente a uma camada.
+: Contains shared utilities and error handling that do not belong exclusively to a single layer.
 
 `main.py`
-: Ponto de entrada da aplicação. Deve montar as dependências e iniciar a interface gráfica.
+: The application’s entry point. It should load dependencies and launch the graphical user interface.
 
-## Tecnologias
+## Technologies
 
-1. Python - Linguagem de programação.
-2. SQLite - Banco de dados local.
-3. PySide6 - Interface gráfica desktop.
-4. pandas - Apoio para análise e transformação de dados.
-5. openpyxl - Leitura e escrita de arquivos Excel.
-6. PyInstaller - Geração do executável `.exe`.
+1. Python - Programming language.
+2. SQLite - Local database.
+3. PySide6 - Desktop graphical user interface.
+4. pandas - Support for data analysis and transformation.
+5. openpyxl - Reading and writing Excel files.
+6. PyInstaller - Generation of the `.exe` executable.
 
-## Instalação
+## Installation
 
-Após criar e ativar o ambiente virtual:
+After creating and activating the virtual environment:
 
 ```bash
 pip install PySide6
@@ -83,16 +84,16 @@ pip install pyinstaller
 pip freeze > requirements.txt
 ```
 
-O SQLite não precisa ser instalado separadamente, pois já faz parte da biblioteca padrão do Python.
+SQLite does not need to be installed separately, as it is already part of the standard Python library.
 
-## Distribuição
+## Distribution
 
-Formas previstas para entregar o aplicativo ao usuário:
+Planned methods for delivering the application to the user:
 
-1. Upload do instalador ou executável no MediaFire.
-2. Transferência via USB.
-3. Upload do programa no OneDrive.
+1. Upload the installer or executable to MediaFire.
+2. Transfer via USB.
+3. Upload the program to OneDrive.
 
-## Documentação
+## Documentation
 
-A visão arquitetural detalhada está em `docs/ARQUITETURA.md`.
+The detailed architectural overview is in `docs/ARCHITECTURE.md`.

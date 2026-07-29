@@ -140,37 +140,64 @@ class SqliteGuestRepository:
                 payload,
             )
 
-    def count_guests(self, import_id: int, search: str = "") -> int:
-        query = "SELECT COUNT(*) FROM guests WHERE import_id = ?"
-        params: list[object] = [import_id]
+    def count_guests(self, import_id: int | None, search: str = "") -> int:
+        query = "SELECT COUNT(*) FROM guests WHERE 1 = 1"
+        params: list[object] = []
+        query, params = self._apply_import_filter(query, params, import_id)
         query, params = self._apply_search(query, params, search)
 
         with connect(self._database_path) as connection:
             return int(connection.execute(query, params).fetchone()[0])
 
-    def count_selected_guests(self, import_id: int, search: str = "") -> int:
-        query = "SELECT COUNT(*) FROM guests WHERE import_id = ? AND selected = 1"
-        params: list[object] = [import_id]
+    def count_selected_guests(self, import_id: int | None = None, search: str = "") -> int:
+        query = "SELECT COUNT(*) FROM guests WHERE selected = 1"
+        params: list[object] = []
+        query, params = self._apply_import_filter(query, params, import_id)
         query, params = self._apply_search(query, params, search)
 
         with connect(self._database_path) as connection:
             return int(connection.execute(query, params).fetchone()[0])
+
+    def get_columns(self, import_id: int | None = None) -> tuple[str, ...]:
+        if import_id is not None:
+            imported_file = self.get_import(import_id)
+            return imported_file.columns if imported_file is not None else tuple()
+
+        columns: list[str] = []
+        seen: set[str] = set()
+        for imported_file in reversed(self.list_imports()):
+            for column in imported_file.columns:
+                if column not in seen:
+                    columns.append(column)
+                    seen.add(column)
+        return tuple(columns)
 
     def list_guests(
         self,
-        import_id: int,
+        import_id: int | None,
         limit: int,
         offset: int,
         search: str = "",
+        selected_only: bool = False,
     ) -> list[GuestRecord]:
         query = """
-            SELECT id, import_id, row_number, data_json, selected
+            SELECT
+                guests.id,
+                guests.import_id,
+                imports.sheet_name,
+                guests.row_number,
+                guests.data_json,
+                guests.selected
             FROM guests
-            WHERE import_id = ?
+            JOIN imports ON imports.id = guests.import_id
+            WHERE 1 = 1
         """
-        params: list[object] = [import_id]
+        params: list[object] = []
+        query, params = self._apply_import_filter(query, params, import_id)
+        if selected_only:
+            query += " AND guests.selected = 1"
         query, params = self._apply_search(query, params, search)
-        query += " ORDER BY row_number LIMIT ? OFFSET ?"
+        query += " ORDER BY imports.id, guests.row_number LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with connect(self._database_path) as connection:
@@ -187,7 +214,7 @@ class SqliteGuestRepository:
 
     def set_guests_selected(
         self,
-        import_id: int,
+        import_id: int | None,
         selected: bool,
         guest_ids: Sequence[int] | None = None,
         search: str = "",
@@ -202,25 +229,45 @@ class SqliteGuestRepository:
                 )
                 return len(guest_ids)
 
-            query = "UPDATE guests SET selected = ? WHERE import_id = ?"
-            params: list[object] = [selected_value, import_id]
+            query = "UPDATE guests SET selected = ? WHERE 1 = 1"
+            params: list[object] = [selected_value]
+            query, params = self._apply_import_filter(query, params, import_id)
             query, params = self._apply_search(query, params, search)
             cursor = connection.execute(query, params)
             return int(cursor.rowcount)
 
-    def iter_selected_guests(self, import_id: int) -> Iterable[GuestRecord]:
+    def iter_selected_guests(self, import_id: int | None = None) -> Iterable[GuestRecord]:
+        query = """
+            SELECT
+                guests.id,
+                guests.import_id,
+                imports.sheet_name,
+                guests.row_number,
+                guests.data_json,
+                guests.selected
+            FROM guests
+            JOIN imports ON imports.id = guests.import_id
+            WHERE guests.selected = 1
+        """
+        params: list[object] = []
+        query, params = self._apply_import_filter(query, params, import_id)
+        query += " ORDER BY imports.id, guests.row_number"
+
         with connect(self._database_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT id, import_id, row_number, data_json, selected
-                FROM guests
-                WHERE import_id = ? AND selected = 1
-                ORDER BY row_number
-                """,
-                (import_id,),
-            )
+            rows = connection.execute(query, params)
             for row in rows:
                 yield self._to_guest(row)
+
+    def _apply_import_filter(
+        self,
+        query: str,
+        params: list[object],
+        import_id: int | None,
+    ) -> tuple[str, list[object]]:
+        if import_id is not None:
+            query += " AND guests.import_id = ?" if "guests" in query else " AND import_id = ?"
+            params.append(import_id)
+        return query, params
 
     def _apply_search(
         self,
@@ -249,6 +296,7 @@ class SqliteGuestRepository:
         return GuestRecord(
             id=int(row["id"]),
             import_id=int(row["import_id"]),
+            sheet_name=str(row["sheet_name"]),
             row_number=int(row["row_number"]),
             data=json.loads(row["data_json"]),
             selected=bool(row["selected"]),

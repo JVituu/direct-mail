@@ -37,18 +37,22 @@ class GuestRepository(Protocol):
     ) -> None:
         raise NotImplementedError
 
-    def count_guests(self, import_id: int, search: str = "") -> int:
+    def count_guests(self, import_id: int | None, search: str = "") -> int:
         raise NotImplementedError
 
-    def count_selected_guests(self, import_id: int, search: str = "") -> int:
+    def count_selected_guests(self, import_id: int | None = None, search: str = "") -> int:
+        raise NotImplementedError
+
+    def get_columns(self, import_id: int | None = None) -> tuple[str, ...]:
         raise NotImplementedError
 
     def list_guests(
         self,
-        import_id: int,
+        import_id: int | None,
         limit: int,
         offset: int,
         search: str = "",
+        selected_only: bool = False,
     ) -> list[GuestRecord]:
         raise NotImplementedError
 
@@ -57,12 +61,12 @@ class GuestRepository(Protocol):
 
     def set_guests_selected(
         self,
-        import_id: int,
+        import_id: int | None,
         selected: bool,
         guest_ids: Sequence[int] | None = None,
         search: str = "",
     ) -> int:
         raise NotImplementedError
 
-    def iter_selected_guests(self, import_id: int) -> Iterable[GuestRecord]:
+    def iter_selected_guests(self, import_id: int | None = None) -> Iterable[GuestRecord]:
         raise NotImplementedError

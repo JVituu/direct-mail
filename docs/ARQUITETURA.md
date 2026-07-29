@@ -51,6 +51,7 @@ Responsabilidade:
 Casos de uso previstos:
 
 - Importar planilha.
+- Importar múltiplas abas de uma pasta Excel.
 - Listar convidados importados.
 - Selecionar convidados.
 - Criar lista final de convidados.
@@ -107,6 +108,17 @@ No MVP, o banco local é criado em `data/mala_direta.sqlite3` e possui tabelas p
 A leitura de planilhas deve ficar isolada em `app/infrastructure/spreadsheet`. Assim, se no futuro a leitura mudar de pandas para openpyxl puro, a regra de negócio não será afetada.
 
 Para planilhas grandes, a leitura inicial do MVP usa `openpyxl` em modo `read_only`, importando os dados em lotes para o SQLite. A interface exibe os registros por paginação, evitando carregar todos os registros na tabela de uma vez.
+
+O importador detecta a linha de cabeçalho dentro das primeiras linhas da aba. Isso permite ler planilhas com título e observação antes da tabela real, como:
+
+```text
+Linha 1: Contatos fictícios — Amigos
+Linha 2: Texto de observação
+Linha 3: Nome | Endereço | Telefone | Obra / Universo
+Linha 4+: Dados
+```
+
+Cada aba útil é importada como uma lista independente. A interface também possui uma visão automática de selecionados, formada dinamicamente a partir dos convidados marcados nas listas importadas.
 
 ## Testes
 

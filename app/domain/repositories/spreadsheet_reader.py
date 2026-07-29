@@ -11,5 +11,8 @@ class SpreadsheetReader(Protocol):
     def read_headers(self, file_path: str, sheet_name: str) -> list[str]:
         raise NotImplementedError
 
+    def has_table(self, file_path: str, sheet_name: str) -> bool:
+        raise NotImplementedError
+
     def iter_rows(self, file_path: str, sheet_name: str) -> Iterable[SpreadsheetRow]:
         raise NotImplementedError

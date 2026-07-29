@@ -1,6 +1,11 @@
 from collections.abc import Callable, Sequence
 
-from app.application.dtos.guest_dto import GuestPageDTO, ImportResultDTO, ImportSummaryDTO
+from app.application.dtos.guest_dto import (
+    GuestPageDTO,
+    ImportResultDTO,
+    ImportSummaryDTO,
+    WorkbookImportResultDTO,
+)
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase
@@ -42,11 +47,23 @@ class MainViewModel:
         self,
         file_path: str,
         sheet_name: str,
-        progress_callback: Callable[[int], None] | None = None,
+        progress_callback: Callable[[str, int], None] | None = None,
     ) -> ImportResultDTO:
         return self._import_spreadsheet.execute(
             file_path=file_path,
             sheet_name=sheet_name,
+            progress_callback=progress_callback,
+        )
+
+    def import_workbook(
+        self,
+        file_path: str,
+        sheet_names: list[str] | None = None,
+        progress_callback: Callable[[str, int], None] | None = None,
+    ) -> WorkbookImportResultDTO:
+        return self._import_spreadsheet.execute_workbook(
+            file_path=file_path,
+            sheet_names=sheet_names,
             progress_callback=progress_callback,
         )
 
@@ -55,16 +72,18 @@ class MainViewModel:
 
     def load_guests(
         self,
-        import_id: int,
+        import_id: int | None,
         page: int,
         page_size: int,
         search: str = "",
+        selected_only: bool = False,
     ) -> GuestPageDTO:
         return self._list_guests.execute(
             import_id=import_id,
             page=page,
             page_size=page_size,
             search=search,
+            selected_only=selected_only,
         )
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
@@ -75,7 +94,7 @@ class MainViewModel:
 
     def set_all_filtered_selected(
         self,
-        import_id: int,
+        import_id: int | None,
         selected: bool,
         search: str = "",
     ) -> int:
@@ -85,5 +104,7 @@ class MainViewModel:
             search=search,
         )
 
-    def export_selected(self, import_id: int, output_path: str) -> ImportResultDTO:
+    def export_selected(self, import_id: int | None, output_path: str) -> ImportResultDTO:
         return self._export_selected.execute(import_id, output_path)
+
+

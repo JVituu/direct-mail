@@ -96,9 +96,9 @@ class GuestTableModel(QAbstractTableModel):
             Qt.CheckState.Checked.value,
         )
         row = self._rows[index.row()]
-        self._selection_changed(row.id, selected)
         row.selected = selected
         self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+        self._selection_changed(row.id, selected)
         return True
 
     def guest_ids(self) -> list[int]:

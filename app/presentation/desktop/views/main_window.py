@@ -1,30 +1,31 @@
 from math import ceil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QModelIndex, QObject, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QProgressBar,
     QSizePolicy,
     QSpinBox,
-    QTabWidget,
+    QTabBar,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from app.application.dtos.guest_dto import WorkbookImportResultDTO
+from app.application.dtos.guest_dto import ImportSummaryDTO, WorkbookImportResultDTO
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
 from app.presentation.desktop.widgets.guest_table_model import GuestTableModel
 
@@ -55,37 +56,42 @@ class MainWindow(QMainWindow):
     def __init__(self, view_model: MainViewModel) -> None:
         super().__init__()
         self._view_model = view_model
+        self._current_workbook_id: int | None = None
         self._current_import_id: int | None = None
+        self._current_sheet_selectable = False
+        self._automatic_mode = False
         self._current_search = ""
-        self._source_page = 0
-        self._selected_page = 0
-        self._source_total_rows = 0
-        self._source_page_size = 0
-        self._selected_total_rows = 0
-        self._selected_page_size = 0
-        self._source_model: GuestTableModel | None = None
-        self._selected_model: GuestTableModel | None = None
+        self._current_page = 0
+        self._total_rows = 0
+        self._selected_rows = 0
+        self._page_size = 0
+        self._imports: list[ImportSummaryDTO] = []
+        self._table_model: GuestTableModel | None = None
         self._import_thread: QThread | None = None
         self._import_worker: ImportWorker | None = None
 
         self.setWindowTitle("Mala Direta")
-        self.resize(1280, 820)
+        self.resize(1320, 840)
         self._build_ui()
         self._apply_styles()
-        self._load_imports()
+        self._load_workbooks()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
         root.setObjectName("AppRoot")
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 18, 18, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         layout.addWidget(self._build_header())
-        layout.addWidget(self._build_filters())
-        layout.addWidget(self._build_selection_actions())
-        layout.addWidget(self._build_tabs(), 1)
-        layout.addWidget(self._build_status_bar())
+        layout.addWidget(self._build_workbook_tabs())
+        layout.addWidget(self._build_filters_and_actions())
+
+        self.table = self._create_table()
+        layout.addWidget(self.table, 1)
+
+        layout.addWidget(self._build_sheet_tabs())
+        layout.addWidget(self._build_footer())
 
         self.setCentralWidget(root)
 
@@ -94,12 +100,12 @@ class MainWindow(QMainWindow):
         header.setObjectName("Header")
         layout = QHBoxLayout(header)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
 
         title_box = QVBoxLayout()
-        title = QLabel("Mala Direta")
+        title = QLabel("Mala Direta -  Instituto Ricardo Brennand")
         title.setObjectName("Title")
-        subtitle = QLabel("Importe abas do Excel, filtre listas e acompanhe a planilha automática de selecionados.")
+        subtitle = QLabel("Arquivos Excel viram abas; cada sheet aparece como uma planilha interna.")
         subtitle.setObjectName("Subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -117,18 +123,37 @@ class MainWindow(QMainWindow):
 
         return header
 
-    def _build_filters(self) -> QFrame:
+    def _build_workbook_tabs(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("Panel")
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(10)
 
-        layout.addWidget(QLabel("Lista"))
-        self.category_combo = QComboBox()
-        self.category_combo.setMinimumWidth(240)
-        self.category_combo.currentIndexChanged.connect(self._on_category_changed)
-        layout.addWidget(self.category_combo)
+        label = QLabel("Arquivos")
+        label.setObjectName("SmallLabel")
+        layout.addWidget(label)
+
+        self.workbook_tabs = QTabBar()
+        self.workbook_tabs.setExpanding(False)
+        self.workbook_tabs.setUsesScrollButtons(True)
+        self.workbook_tabs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.workbook_tabs.currentChanged.connect(self._on_workbook_changed)
+        self.workbook_tabs.customContextMenuRequested.connect(self._show_workbook_context_menu)
+        layout.addWidget(self.workbook_tabs, 1)
+
+        return frame
+
+    def _build_filters_and_actions(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
+
+        self.filter_button = QPushButton("Filtros")
+        self.filter_button.clicked.connect(self._show_filter_menu)
+        layout.addWidget(self.filter_button)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Buscar por nome, telefone, endereço, obra ou qualquer coluna")
@@ -152,15 +177,6 @@ class MainWindow(QMainWindow):
         self.page_size_input.valueChanged.connect(self._change_page_size)
         layout.addWidget(self.page_size_input)
 
-        return frame
-
-    def _build_selection_actions(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("Panel")
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(10)
-
         self.select_page_button = QPushButton("Selecionar página")
         self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
         layout.addWidget(self.select_page_button)
@@ -169,103 +185,62 @@ class MainWindow(QMainWindow):
         self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
         layout.addWidget(self.clear_page_button)
 
-        self.select_all_button = QPushButton("Selecionar todos filtrados")
+        self.select_all_button = QPushButton("Selecionar todos")
         self.select_all_button.clicked.connect(lambda: self._set_all_filtered_selection(True))
         layout.addWidget(self.select_all_button)
 
-        self.clear_all_button = QPushButton("Limpar todos filtrados")
+        self.clear_all_button = QPushButton("Limpar todos")
         self.clear_all_button.clicked.connect(lambda: self._set_all_filtered_selection(False))
         layout.addWidget(self.clear_all_button)
 
-        layout.addStretch()
-        self.summary_label = QLabel("Nenhuma planilha importada")
-        self.summary_label.setObjectName("Summary")
-        layout.addWidget(self.summary_label)
+        return frame
+
+    def _build_sheet_tabs(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("SheetBar")
+        self.sheet_frame = frame
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        label = QLabel("Abas")
+        label.setObjectName("SmallLabel")
+        layout.addWidget(label)
+
+        self.sheet_tabs = QTabBar()
+        self.sheet_tabs.setExpanding(False)
+        self.sheet_tabs.setUsesScrollButtons(True)
+        self.sheet_tabs.currentChanged.connect(self._on_sheet_changed)
+        layout.addWidget(self.sheet_tabs, 1)
 
         return frame
 
-    def _build_tabs(self) -> QTabWidget:
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_source_tab(), "Planilhas importadas")
-        self.tabs.addTab(self._build_selected_tab(), "Planilha automática")
-        self.tabs.currentChanged.connect(lambda _: self._update_actions())
-        return self.tabs
-
-    def _build_source_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(8)
-
-        self.source_table = self._create_table()
-        layout.addWidget(self.source_table, 1)
-
-        page_bar = QHBoxLayout()
-        self.source_first_page_button = QPushButton("Primeira")
-        self.source_first_page_button.clicked.connect(self._go_source_first_page)
-        page_bar.addWidget(self.source_first_page_button)
-
-        self.source_previous_page_button = QPushButton("Anterior")
-        self.source_previous_page_button.clicked.connect(self._go_source_previous_page)
-        page_bar.addWidget(self.source_previous_page_button)
-
-        self.source_next_page_button = QPushButton("Próxima")
-        self.source_next_page_button.clicked.connect(self._go_source_next_page)
-        page_bar.addWidget(self.source_next_page_button)
-
-        self.source_last_page_button = QPushButton("Última")
-        self.source_last_page_button.clicked.connect(self._go_source_last_page)
-        page_bar.addWidget(self.source_last_page_button)
-
-        self.source_page_label = QLabel("Nenhuma planilha importada")
-        page_bar.addWidget(self.source_page_label)
-        page_bar.addStretch()
-        layout.addLayout(page_bar)
-
-        return tab
-
-    def _build_selected_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(8)
-
-        hint = QLabel("Esta é a planilha criada automaticamente conforme você seleciona convidados.")
-        hint.setObjectName("Hint")
-        layout.addWidget(hint)
-
-        self.selected_table = self._create_table()
-        layout.addWidget(self.selected_table, 1)
-
-        page_bar = QHBoxLayout()
-        self.selected_first_page_button = QPushButton("Primeira")
-        self.selected_first_page_button.clicked.connect(self._go_selected_first_page)
-        page_bar.addWidget(self.selected_first_page_button)
-
-        self.selected_previous_page_button = QPushButton("Anterior")
-        self.selected_previous_page_button.clicked.connect(self._go_selected_previous_page)
-        page_bar.addWidget(self.selected_previous_page_button)
-
-        self.selected_next_page_button = QPushButton("Próxima")
-        self.selected_next_page_button.clicked.connect(self._go_selected_next_page)
-        page_bar.addWidget(self.selected_next_page_button)
-
-        self.selected_last_page_button = QPushButton("Última")
-        self.selected_last_page_button.clicked.connect(self._go_selected_last_page)
-        page_bar.addWidget(self.selected_last_page_button)
-
-        self.selected_page_label = QLabel("Nenhum convidado selecionado")
-        page_bar.addWidget(self.selected_page_label)
-        page_bar.addStretch()
-        layout.addLayout(page_bar)
-
-        return tab
-
-    def _build_status_bar(self) -> QFrame:
+    def _build_footer(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("StatusBar")
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.first_page_button = QPushButton("Primeira")
+        self.first_page_button.clicked.connect(self._go_first_page)
+        layout.addWidget(self.first_page_button)
+
+        self.previous_page_button = QPushButton("Anterior")
+        self.previous_page_button.clicked.connect(self._go_previous_page)
+        layout.addWidget(self.previous_page_button)
+
+        self.next_page_button = QPushButton("Próxima")
+        self.next_page_button.clicked.connect(self._go_next_page)
+        layout.addWidget(self.next_page_button)
+
+        self.last_page_button = QPushButton("Última")
+        self.last_page_button.clicked.connect(self._go_last_page)
+        layout.addWidget(self.last_page_button)
+
+        self.page_label = QLabel("Nenhuma planilha importada")
+        layout.addWidget(self.page_label)
+        layout.addStretch()
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -274,7 +249,6 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Pronto")
         layout.addWidget(self.status_label)
-        layout.addStretch()
 
         return frame
 
@@ -284,9 +258,15 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(False)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         table.horizontalHeader().setDefaultSectionSize(170)
         table.verticalHeader().setDefaultSectionSize(28)
+        table.clicked.connect(self._on_table_clicked)
         return table
 
     def _apply_styles(self) -> None:
@@ -297,7 +277,7 @@ class MainWindow(QMainWindow):
                 color: #172033;
                 font-size: 13px;
             }
-            QFrame#Header {
+            QFrame#Header, QFrame#Panel, QFrame#SheetBar {
                 background: #ffffff;
                 border: 1px solid #dde4ef;
                 border-radius: 8px;
@@ -307,17 +287,12 @@ class MainWindow(QMainWindow):
                 font-size: 24px;
                 font-weight: 700;
             }
-            QLabel#Subtitle, QLabel#Hint {
+            QLabel#Subtitle {
                 color: #607089;
             }
-            QLabel#Summary {
-                color: #0f2f5f;
-                font-weight: 600;
-            }
-            QFrame#Panel {
-                background: #ffffff;
-                border: 1px solid #dde4ef;
-                border-radius: 8px;
+            QLabel#SmallLabel {
+                color: #52647d;
+                font-weight: 700;
             }
             QPushButton {
                 background: #eef3f9;
@@ -353,7 +328,7 @@ class MainWindow(QMainWindow):
             QPushButton#SuccessButton:hover {
                 background: #126c50;
             }
-            QLineEdit, QComboBox, QSpinBox {
+            QLineEdit, QSpinBox {
                 background: #ffffff;
                 border: 1px solid #cfd9e8;
                 border-radius: 6px;
@@ -375,23 +350,19 @@ class MainWindow(QMainWindow):
                 padding: 7px;
                 font-weight: 700;
             }
-            QTabWidget::pane {
-                border: 0;
-            }
             QTabBar::tab {
                 background: #e9eff7;
                 color: #33445f;
                 border: 1px solid #cfd9e8;
-                border-bottom: 0;
-                padding: 9px 16px;
+                padding: 8px 14px;
                 margin-right: 4px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
+                border-radius: 6px;
                 font-weight: 600;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
                 color: #0f2f5f;
+                border-color: #9bb8df;
             }
             """
         )
@@ -408,7 +379,7 @@ class MainWindow(QMainWindow):
 
     def _start_import(self, file_path: str) -> None:
         self._set_busy(True)
-        self.status_label.setText("Importando workbook...")
+        self.status_label.setText("Importando arquivo...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
@@ -440,18 +411,16 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 100)
         self.status_label.setText(f"{result.total_rows} linhas importadas.")
-        self._load_imports(preferred_import_id=None)
+        self._load_workbooks(preferred_workbook_id=result.workbook_id)
 
-        skipped = ""
-        if result.skipped_sheets:
-            skipped = "\n\nAbas ignoradas sem tabela de contatos: " + ", ".join(result.skipped_sheets)
+        selectable_count = sum(1 for sheet in result.imported_sheets if sheet.is_selectable)
         QMessageBox.information(
             self,
             "Importação concluída",
             (
-                f"{len(result.imported_sheets)} listas importadas de '{result.file_name}'.\n"
-                f"{result.total_rows} registros disponíveis no sistema."
-                f"{skipped}"
+                f"Arquivo '{result.file_name}' importado.\n"
+                f"{len(result.imported_sheets)} abas carregadas, "
+                f"{selectable_count} listas selecionáveis."
             ),
         )
 
@@ -467,165 +436,372 @@ class MainWindow(QMainWindow):
         self._import_thread = None
         self._import_worker = None
 
-    def _load_imports(self, preferred_import_id: int | None = None) -> None:
-        imports = self._view_model.list_imports()
-        self.category_combo.blockSignals(True)
-        self.category_combo.clear()
-        self.category_combo.addItem("Todas as listas", None)
+    def _load_workbooks(self, preferred_workbook_id: int | None = None) -> None:
+        workbooks = self._view_model.list_workbooks()
 
-        for imported_file in imports:
-            label = f"{imported_file.sheet_name} ({imported_file.total_rows})"
-            self.category_combo.addItem(label, imported_file.id)
+        self.workbook_tabs.blockSignals(True)
+        self._clear_tab_bar(self.workbook_tabs)
+        for workbook in workbooks:
+            self.workbook_tabs.addTab(f"{workbook.display_name} ({workbook.total_rows})")
+            self.workbook_tabs.setTabData(
+                self.workbook_tabs.count() - 1,
+                {"kind": "workbook", "workbook_id": workbook.id},
+            )
+        automatic_count = self._automatic_selected_count()
+        if workbooks and automatic_count > 0:
+            self.workbook_tabs.addTab(self._automatic_tab_text(automatic_count))
+            self.workbook_tabs.setTabData(
+                self.workbook_tabs.count() - 1,
+                {"kind": "automatic", "workbook_id": None},
+            )
+        self.workbook_tabs.blockSignals(False)
+
+        if not workbooks:
+            self._current_workbook_id = None
+            self._automatic_mode = False
+            self._imports = []
+            self._load_sheet_tabs()
+            self._update_actions()
+            return
 
         target_index = 0
-        if preferred_import_id is not None:
-            for index in range(self.category_combo.count()):
-                if self.category_combo.itemData(index) == preferred_import_id:
+        if preferred_workbook_id is not None:
+            for index in range(self.workbook_tabs.count()):
+                tab_data = self.workbook_tabs.tabData(index)
+                if tab_data and tab_data["kind"] == "workbook" and tab_data["workbook_id"] == preferred_workbook_id:
                     target_index = index
                     break
+        self.workbook_tabs.setCurrentIndex(target_index)
+        self._on_workbook_changed(target_index)
 
-        self.category_combo.setCurrentIndex(target_index)
-        self.category_combo.blockSignals(False)
-        self._current_import_id = self.category_combo.currentData()
-        self._source_page = 0
-        self._selected_page = 0
-        self._load_tables()
+    def _on_workbook_changed(self, index: int) -> None:
+        tab_data = self.workbook_tabs.tabData(index) if index >= 0 else None
+        if index < 0:
+            self._current_workbook_id = None
+            self._automatic_mode = False
+        elif tab_data and tab_data["kind"] == "automatic":
+            self._current_workbook_id = None
+            self._current_import_id = None
+            self._current_sheet_selectable = True
+            self._automatic_mode = True
+        else:
+            self._current_workbook_id = int(tab_data["workbook_id"])
+            self._automatic_mode = False
+        self._current_search = ""
+        self.search_input.clear()
+        self._current_page = 0
+        self._load_sheet_tabs()
 
-    def _on_category_changed(self) -> None:
-        self._current_import_id = self.category_combo.currentData()
-        self._source_page = 0
-        self._selected_page = 0
-        self._load_tables()
+    def _load_sheet_tabs(self) -> None:
+        if self._automatic_mode:
+            self.sheet_frame.setVisible(False)
+            self.sheet_tabs.blockSignals(True)
+            self._clear_tab_bar(self.sheet_tabs)
+            self.sheet_tabs.blockSignals(False)
+            self._load_table()
+            return
+
+        self.sheet_frame.setVisible(True)
+        previous_data = self.sheet_tabs.tabData(self.sheet_tabs.currentIndex())
+        self.sheet_tabs.blockSignals(True)
+        self._clear_tab_bar(self.sheet_tabs)
+
+        self._imports = self._view_model.list_imports(self._current_workbook_id) if self._current_workbook_id else []
+        for imported_sheet in self._imports:
+            label = imported_sheet.sheet_name
+            if imported_sheet.is_selectable:
+                label = f"{label} ({imported_sheet.total_rows})"
+            else:
+                label = f"{label} · visualização"
+            self.sheet_tabs.addTab(label)
+            self.sheet_tabs.setTabData(
+                self.sheet_tabs.count() - 1,
+                {
+                    "kind": "sheet",
+                    "import_id": imported_sheet.id,
+                    "selectable": imported_sheet.is_selectable,
+                },
+            )
+
+        self.sheet_tabs.blockSignals(False)
+        target_index = self._find_matching_sheet_tab(previous_data)
+        self.sheet_tabs.setCurrentIndex(target_index if target_index >= 0 else (0 if self.sheet_tabs.count() else -1))
+        self._on_sheet_changed(self.sheet_tabs.currentIndex())
+
+    def _clear_tab_bar(self, tab_bar: QTabBar) -> None:
+        while tab_bar.count():
+            tab_bar.removeTab(0)
+
+    def _find_matching_sheet_tab(self, previous_data: object) -> int:
+        if not previous_data:
+            return -1
+        for index in range(self.sheet_tabs.count()):
+            tab_data = self.sheet_tabs.tabData(index)
+            if tab_data == previous_data:
+                return index
+        return -1
+
+    def _show_filter_menu(self) -> None:
+        if self._automatic_mode or not self._imports:
+            return
+
+        menu = QMenu(self)
+        for index, imported_sheet in enumerate(self._imports):
+            label = imported_sheet.sheet_name
+            if not imported_sheet.is_selectable:
+                label = f"{label} · visualização"
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(index == self.sheet_tabs.currentIndex())
+            action.setData(index)
+
+        selected_action = menu.exec(self.filter_button.mapToGlobal(self.filter_button.rect().bottomLeft()))
+        if selected_action is None:
+            return
+
+        target_index = int(selected_action.data())
+        if target_index != self.sheet_tabs.currentIndex():
+            self.sheet_tabs.setCurrentIndex(target_index)
+
+    def _automatic_selected_count(self) -> int:
+        try:
+            return self._view_model.load_guests(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            ).total_rows
+        except Exception:
+            return 0
+
+    def _automatic_tab_text(self, selected_count: int | None = None) -> str:
+        count = self._automatic_selected_count() if selected_count is None else selected_count
+        return f"{self._view_model.automatic_sheet_name()} ({count})"
+
+    def _automatic_tab_index(self) -> int:
+        for index in range(self.workbook_tabs.count()):
+            tab_data = self.workbook_tabs.tabData(index)
+            if tab_data and tab_data["kind"] == "automatic":
+                return index
+        return -1
+
+    def _refresh_automatic_tab_label(self) -> None:
+        selected_count = self._automatic_selected_count()
+        index = self._automatic_tab_index()
+
+        if selected_count > 0:
+            if index >= 0:
+                self.workbook_tabs.setTabText(index, self._automatic_tab_text(selected_count))
+                return
+
+            self.workbook_tabs.blockSignals(True)
+            self.workbook_tabs.addTab(self._automatic_tab_text(selected_count))
+            self.workbook_tabs.setTabData(
+                self.workbook_tabs.count() - 1,
+                {"kind": "automatic", "workbook_id": None},
+            )
+            self.workbook_tabs.blockSignals(False)
+            return
+
+        if index < 0:
+            return
+
+        if self.workbook_tabs.currentIndex() == index:
+            self._load_workbooks()
+            return
+
+        self.workbook_tabs.blockSignals(True)
+        self.workbook_tabs.removeTab(index)
+        self.workbook_tabs.blockSignals(False)
+
+    def _on_sheet_changed(self, index: int) -> None:
+        if self._automatic_mode:
+            self._current_import_id = None
+            self._current_sheet_selectable = True
+            self._load_table()
+            return
+
+        tab_data = self.sheet_tabs.tabData(index) if index >= 0 else None
+        if not tab_data:
+            self._current_import_id = None
+            self._current_sheet_selectable = False
+            self._automatic_mode = False
+        else:
+            self._current_import_id = tab_data["import_id"]
+            self._current_sheet_selectable = bool(tab_data["selectable"])
+        self._current_page = 0
+        self._load_table()
 
     def _apply_search(self) -> None:
         self._current_search = self.search_input.text().strip()
-        self._source_page = 0
-        self._selected_page = 0
-        self._load_tables()
+        self._current_page = 0
+        self._load_table()
 
     def _clear_search(self) -> None:
         self.search_input.clear()
         self._current_search = ""
-        self._source_page = 0
-        self._selected_page = 0
-        self._load_tables()
+        self._current_page = 0
+        self._load_table()
 
     def _change_page_size(self) -> None:
-        self._source_page = 0
-        self._selected_page = 0
-        self._load_tables()
+        self._current_page = 0
+        self._load_table()
 
-    def _load_tables(self) -> None:
-        self._load_source_page()
-        self._load_selected_page()
-        self._update_actions()
+    def _load_table(self) -> None:
+        if self._automatic_mode:
+            workbook_id = None
+            import_id = None
+            selected_only = True
+        elif self._current_workbook_id is not None and self.sheet_tabs.count() > 0:
+            workbook_id = self._current_workbook_id
+            import_id = self._current_import_id
+            selected_only = False
+        else:
+            self._set_table_page([], tuple(), tuple(), 0, 0, 0)
+            return
 
-    def _load_source_page(self) -> None:
         try:
             page = self._view_model.load_guests(
-                import_id=self._current_import_id,
-                page=self._source_page,
+                import_id=import_id,
+                workbook_id=workbook_id,
+                page=self._current_page,
                 page_size=self.page_size_input.value(),
                 search=self._current_search,
+                selected_only=selected_only,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao carregar dados", str(exc))
             return
 
-        self._source_total_rows = page.total_rows
-        self._source_page_size = page.page_size
-        self._source_page = self._normalize_page(self._source_page, page.total_rows, page.page_size)
-        self._source_model = GuestTableModel(page.rows, page.columns, self._on_source_selection_changed)
-        self.source_table.setModel(self._source_model)
-        self._configure_table_widths(self.source_table)
-        self._update_source_label(page.total_rows, page.selected_rows, page.page_size)
-
-    def _load_selected_page(self) -> None:
-        try:
-            page = self._view_model.load_guests(
-                import_id=self._current_import_id,
-                page=self._selected_page,
-                page_size=self.page_size_input.value(),
-                search=self._current_search,
-                selected_only=True,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Erro ao carregar selecionados", str(exc))
-            return
-
-        self._selected_total_rows = page.total_rows
-        self._selected_page_size = page.page_size
-        self._selected_page = self._normalize_page(self._selected_page, page.total_rows, page.page_size)
-        self._selected_model = GuestTableModel(page.rows, page.columns, self._on_selected_selection_changed)
-        self.selected_table.setModel(self._selected_model)
-        self._configure_table_widths(self.selected_table)
-        self._update_selected_label(page.total_rows, page.page_size)
-        self.summary_label.setText(
-            f"{self._source_total_rows} registros no filtro | {self._selected_total_rows} na planilha automática"
+        self._current_page = self._normalize_page(self._current_page, page.total_rows, page.page_size)
+        self._set_table_page(
+            rows=page.rows,
+            columns=page.columns,
+            editable_columns=page.editable_columns,
+            total_rows=page.total_rows,
+            selected_rows=page.selected_rows,
+            page_size=page.page_size,
         )
 
-    def _configure_table_widths(self, table: QTableView) -> None:
-        table.setColumnWidth(0, 110)
-        table.setColumnWidth(1, 70)
-        if table.model() is not None and table.model().columnCount() > 2:
-            table.setColumnWidth(2, 150)
+    def _set_table_page(
+        self,
+        rows: list[object],
+        columns: tuple[str, ...],
+        editable_columns: tuple[str, ...],
+        total_rows: int,
+        selected_rows: int,
+        page_size: int,
+    ) -> None:
+        self._total_rows = total_rows
+        self._selected_rows = selected_rows
+        self._page_size = page_size
+        self._table_model = GuestTableModel(
+            rows,
+            columns,
+            editable_columns,
+            self._on_row_selection_changed,
+            self._on_cell_changed,
+            highlight_selected_rows=not self._automatic_mode,
+        )
+        self.table.setModel(self._table_model)
+        self.table.setColumnWidth(0, 110)
+        self.table.setColumnWidth(1, 70)
+        if self.table.model() is not None and self.table.model().columnCount() > 2:
+            self.table.setColumnWidth(2, 190)
+        self._update_page_label()
+        self._update_actions()
+
+    def _update_page_label(self) -> None:
+        if self._total_rows == 0:
+            message = "Nenhum convidado selecionado" if self._automatic_mode else "Nenhum registro encontrado"
+            self.page_label.setText(message)
+            return
+
+        total_pages = max(ceil(self._total_rows / max(self._page_size, 1)), 1)
+        suffix = "na planilha automática" if self._automatic_mode else f"{self._selected_rows} selecionados"
+        self.page_label.setText(
+            f"Página {self._current_page + 1} de {total_pages} | {self._total_rows} registros | {suffix}"
+        )
 
     def _normalize_page(self, page: int, total_rows: int, page_size: int) -> int:
         max_page_index = max(ceil(total_rows / max(page_size, 1)) - 1, 0)
         return min(page, max_page_index)
 
-    def _update_source_label(self, total_rows: int, selected_rows: int, page_size: int) -> None:
-        if total_rows == 0:
-            self.source_page_label.setText("Nenhum registro encontrado")
-            return
-        total_pages = max(ceil(total_rows / max(page_size, 1)), 1)
-        self.source_page_label.setText(
-            f"Página {self._source_page + 1} de {total_pages} | "
-            f"{total_rows} registros | {selected_rows} selecionados no filtro"
-        )
-
-    def _update_selected_label(self, total_rows: int, page_size: int) -> None:
-        if total_rows == 0:
-            self.selected_page_label.setText("Nenhum convidado selecionado")
-            return
-        total_pages = max(ceil(total_rows / max(page_size, 1)), 1)
-        self.selected_page_label.setText(
-            f"Página {self._selected_page + 1} de {total_pages} | "
-            f"{total_rows} convidados na planilha automática"
-        )
-
-    def _on_source_selection_changed(self, guest_id: int, selected: bool) -> None:
-        self._set_single_guest_selected(guest_id, selected)
-
-    def _on_selected_selection_changed(self, guest_id: int, selected: bool) -> None:
-        self._set_single_guest_selected(guest_id, selected)
-
-    def _set_single_guest_selected(self, guest_id: int, selected: bool) -> None:
+    def _on_row_selection_changed(self, guest_id: int, selected: bool) -> None:
         try:
             self._view_model.set_guest_selected(guest_id, selected)
-            self._load_tables()
+            self._refresh_automatic_tab_label()
+            self._load_table()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao selecionar", str(exc))
 
-    def _set_page_selection(self, selected: bool) -> None:
-        if self._source_model is None:
+    def _on_cell_changed(self, guest_id: int, column_name: str, value: str) -> bool:
+        try:
+            self._view_model.update_guest_data(
+                guest_id,
+                column_name,
+                value,
+                automatic=self._automatic_mode,
+            )
+            self.status_label.setText("Dado atualizado.")
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao editar", str(exc))
+            return False
+
+    def _on_table_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid() or index.column() != 0 or self._table_model is None:
             return
-        guest_ids = self._source_model.guest_ids()
+        self._table_model.toggle_selection(index.row())
+
+    def _set_page_selection(self, selected: bool) -> None:
+        if self._table_model is None:
+            return
+        guest_ids = self._table_model.guest_ids()
         if not guest_ids:
             return
         try:
             self._view_model.set_page_selected(guest_ids, selected)
-            self._load_tables()
+            self._refresh_automatic_tab_label()
+            self._load_table()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao atualizar seleção", str(exc))
 
     def _set_all_filtered_selection(self, selected: bool) -> None:
+        if self._automatic_mode:
+            if selected:
+                return
+            answer = QMessageBox.question(
+                self,
+                "Limpar planilha automática",
+                "Deseja remover todos os registros filtrados da Planilha automática?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                updated_rows = self._view_model.set_all_filtered_selected(
+                    import_id=None,
+                    workbook_id=None,
+                    selected=False,
+                    search=self._current_search,
+                )
+                self.status_label.setText(f"{updated_rows} registros atualizados.")
+                self._refresh_automatic_tab_label()
+                self._load_table()
+            except Exception as exc:
+                QMessageBox.critical(self, "Erro ao atualizar seleção", str(exc))
+            return
+
+        if not self._current_sheet_selectable:
+            return
+
         action = "selecionar" if selected else "limpar"
-        label = self.category_combo.currentText() or "o filtro atual"
+        sheet_name = self.sheet_tabs.tabText(self.sheet_tabs.currentIndex())
         answer = QMessageBox.question(
             self,
             "Confirmar seleção",
-            f"Deseja {action} todos os registros de '{label}' usando a busca atual?",
+            f"Deseja {action} todos os registros de '{sheet_name}' usando a busca atual?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -633,16 +809,131 @@ class MainWindow(QMainWindow):
         try:
             updated_rows = self._view_model.set_all_filtered_selected(
                 import_id=self._current_import_id,
+                workbook_id=self._current_workbook_id,
                 selected=selected,
                 search=self._current_search,
             )
             self.status_label.setText(f"{updated_rows} registros atualizados.")
-            self._load_tables()
+            self._refresh_automatic_tab_label()
+            self._load_table()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao atualizar seleção", str(exc))
 
+    def _show_workbook_context_menu(self, position: object) -> None:
+        index = self.workbook_tabs.tabAt(position)
+        if index < 0:
+            return
+        tab_data = self.workbook_tabs.tabData(index)
+        if not tab_data:
+            return
+
+        menu = QMenu(self)
+        rename_action = menu.addAction("Renomear planilha")
+        delete_action = menu.addAction("Excluir planilha")
+        selected_action = menu.exec(self.workbook_tabs.mapToGlobal(position))
+
+        if tab_data["kind"] == "automatic":
+            if selected_action == rename_action:
+                self._rename_automatic_sheet()
+            elif selected_action == delete_action:
+                self._delete_automatic_sheet()
+            return
+
+        if tab_data["kind"] != "workbook":
+            return
+
+        workbook_id = int(tab_data["workbook_id"])
+        workbook_name = self.workbook_tabs.tabText(index)
+        if selected_action == rename_action:
+            self._rename_workbook(workbook_id, workbook_name)
+        elif selected_action == delete_action:
+            self._delete_workbook(workbook_id, workbook_name)
+
+    def _rename_workbook(self, workbook_id: int, current_name: str) -> None:
+        clean_current_name = current_name.rsplit(" (", 1)[0]
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Renomear planilha",
+            "Nome da planilha:",
+            text=clean_current_name,
+        )
+        if not accepted:
+            return
+        try:
+            self._view_model.rename_workbook(workbook_id, new_name)
+            self.status_label.setText("Planilha renomeada.")
+            self._load_workbooks(preferred_workbook_id=workbook_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao renomear", str(exc))
+
+    def _rename_automatic_sheet(self) -> None:
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Renomear planilha automática",
+            "Nome da planilha:",
+            text=self._view_model.automatic_sheet_name(),
+        )
+        if not accepted:
+            return
+        try:
+            self._view_model.rename_automatic_sheet(new_name)
+            self.status_label.setText("Planilha automática renomeada.")
+            self._refresh_automatic_tab_label()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao renomear", str(exc))
+
+    def _delete_workbook(self, workbook_id: int, workbook_name: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Excluir planilha",
+            f"Deseja excluir '{workbook_name}' do sistema?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._view_model.delete_workbook(workbook_id)
+            self.status_label.setText("Planilha excluída.")
+            self._load_workbooks()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao excluir", str(exc))
+
+    def _delete_automatic_sheet(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Excluir planilha automática",
+            "Deseja excluir a Planilha automática? Os convidados selecionados serão removidos da lista final.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            updated_rows = self._view_model.clear_automatic_sheet()
+            self._current_search = ""
+            self.search_input.clear()
+            self._current_page = 0
+            self.status_label.setText(
+                f"Planilha automática excluída. {updated_rows} registros removidos da lista final."
+            )
+            self._load_workbooks()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao excluir", str(exc))
+
     def _export_selected(self) -> None:
-        if self._selected_total_rows == 0:
+        if self._automatic_mode:
+            selected_count = self._selected_rows
+            workbook_id = None
+        elif self._current_workbook_id is not None:
+            workbook_id = self._current_workbook_id
+            selected_count = self._view_model.load_guests(
+                import_id=None,
+                workbook_id=workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            ).total_rows
+        else:
+            return
+
+        if selected_count == 0:
             QMessageBox.warning(
                 self,
                 "Nenhum selecionado",
@@ -660,7 +951,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            result = self._view_model.export_selected(self._current_import_id, output_path)
+            result = self._view_model.export_selected(
+                import_id=None,
+                workbook_id=workbook_id,
+                output_path=output_path,
+            )
             self.status_label.setText(f"{result.total_rows} convidados exportados.")
             QMessageBox.information(
                 self,
@@ -670,51 +965,29 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao exportar", str(exc))
 
-    def _go_source_first_page(self) -> None:
-        self._source_page = 0
-        self._load_source_page()
-        self._update_actions()
+    def _go_first_page(self) -> None:
+        self._current_page = 0
+        self._load_table()
 
-    def _go_source_previous_page(self) -> None:
-        self._source_page = max(self._source_page - 1, 0)
-        self._load_source_page()
-        self._update_actions()
+    def _go_previous_page(self) -> None:
+        self._current_page = max(self._current_page - 1, 0)
+        self._load_table()
 
-    def _go_source_next_page(self) -> None:
-        self._source_page += 1
-        self._load_source_page()
-        self._update_actions()
+    def _go_next_page(self) -> None:
+        self._current_page += 1
+        self._load_table()
 
-    def _go_source_last_page(self) -> None:
-        self._source_page = max(ceil(self._source_total_rows / max(self._source_page_size, 1)) - 1, 0)
-        self._load_source_page()
-        self._update_actions()
-
-    def _go_selected_first_page(self) -> None:
-        self._selected_page = 0
-        self._load_selected_page()
-        self._update_actions()
-
-    def _go_selected_previous_page(self) -> None:
-        self._selected_page = max(self._selected_page - 1, 0)
-        self._load_selected_page()
-        self._update_actions()
-
-    def _go_selected_next_page(self) -> None:
-        self._selected_page += 1
-        self._load_selected_page()
-        self._update_actions()
-
-    def _go_selected_last_page(self) -> None:
-        self._selected_page = max(ceil(self._selected_total_rows / max(self._selected_page_size, 1)) - 1, 0)
-        self._load_selected_page()
-        self._update_actions()
+    def _go_last_page(self) -> None:
+        self._current_page = max(ceil(self._total_rows / max(self._page_size, 1)) - 1, 0)
+        self._load_table()
 
     def _set_busy(self, busy: bool) -> None:
         widgets = (
             self.import_button,
             self.export_button,
-            self.category_combo,
+            self.workbook_tabs,
+            self.sheet_tabs,
+            self.filter_button,
             self.search_input,
             self.search_button,
             self.clear_search_button,
@@ -733,30 +1006,21 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def _update_actions(self) -> None:
-        has_rows = self._source_total_rows > 0
-        has_selected = self._selected_total_rows > 0
-        self.export_button.setEnabled(has_selected)
-        self.search_button.setEnabled(self.category_combo.count() > 1)
-        self.clear_search_button.setEnabled(self.category_combo.count() > 1)
-        self.select_page_button.setEnabled(has_rows)
-        self.clear_page_button.setEnabled(has_rows)
-        self.select_all_button.setEnabled(has_rows)
-        self.clear_all_button.setEnabled(has_rows)
+        has_workbook = self._current_workbook_id is not None
+        has_workspace = has_workbook or self._automatic_mode
+        can_select = has_workbook and self._current_sheet_selectable and not self._automatic_mode and self._total_rows > 0
+        can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
+        has_next = self._total_rows > (self._current_page + 1) * max(self._page_size, 1)
 
-        self.source_first_page_button.setEnabled(self._source_page > 0)
-        self.source_previous_page_button.setEnabled(self._source_page > 0)
-        self.source_next_page_button.setEnabled(
-            self._source_total_rows > (self._source_page + 1) * max(self._source_page_size, 1)
-        )
-        self.source_last_page_button.setEnabled(
-            self._source_total_rows > (self._source_page + 1) * max(self._source_page_size, 1)
-        )
-
-        self.selected_first_page_button.setEnabled(self._selected_page > 0)
-        self.selected_previous_page_button.setEnabled(self._selected_page > 0)
-        self.selected_next_page_button.setEnabled(
-            self._selected_total_rows > (self._selected_page + 1) * max(self._selected_page_size, 1)
-        )
-        self.selected_last_page_button.setEnabled(
-            self._selected_total_rows > (self._selected_page + 1) * max(self._selected_page_size, 1)
-        )
+        self.search_button.setEnabled(has_workspace)
+        self.clear_search_button.setEnabled(has_workspace)
+        self.filter_button.setEnabled(has_workbook and not self._automatic_mode and bool(self._imports))
+        self.export_button.setEnabled(has_workspace)
+        self.select_page_button.setEnabled(can_select)
+        self.clear_page_button.setEnabled(can_clear_page)
+        self.select_all_button.setEnabled(can_select)
+        self.clear_all_button.setEnabled(can_select or (self._automatic_mode and self._total_rows > 0))
+        self.first_page_button.setEnabled(self._current_page > 0)
+        self.previous_page_button.setEnabled(self._current_page > 0)
+        self.next_page_button.setEnabled(has_next)
+        self.last_page_button.setEnabled(has_next)

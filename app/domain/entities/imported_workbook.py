@@ -2,13 +2,10 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class SpreadsheetImport:
+class ImportedWorkbook:
     id: int
-    workbook_id: int
     file_path: str
     file_name: str
-    sheet_name: str
+    display_name: str
     imported_at: str
     total_rows: int
-    columns: tuple[str, ...]
-    is_selectable: bool

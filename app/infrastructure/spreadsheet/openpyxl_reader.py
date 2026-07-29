@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from datetime import date, datetime
+from unicodedata import combining, normalize
 
 from openpyxl import load_workbook
 
@@ -7,8 +8,8 @@ from app.domain.value_objects.spreadsheet_row import SpreadsheetRow
 
 
 class OpenpyxlSpreadsheetReader:
-    _MAX_HEADER_SCAN_ROWS = 40
-    _KNOWN_HEADER_WORDS = {
+    _MAX_HEADER_SCAN_ROWS = 80
+    _CONTACT_HEADER_WORDS = {
         "nome",
         "name",
         "email",
@@ -21,6 +22,24 @@ class OpenpyxlSpreadsheetReader:
         "endereço",
         "contato",
         "contact",
+        "convidado",
+        "convidados",
+        "pessoa",
+        "pessoas",
+        "cliente",
+        "clientes",
+        "participante",
+        "participantes",
+        "destinatario",
+        "destinatário",
+    }
+    _TABLE_HEADER_WORDS = _CONTACT_HEADER_WORDS | {
+        "categoria",
+        "category",
+        "lista",
+        "total",
+        "quantidade",
+        "quantidade de contatos",
     }
 
     def list_sheets(self, file_path: str) -> list[str]:
@@ -72,26 +91,53 @@ class OpenpyxlSpreadsheetReader:
             if len(sample) >= self._MAX_HEADER_SCAN_ROWS:
                 break
 
+        best_candidate: tuple[int, int, list[str]] | None = None
+
         for index, (row_number, raw_values) in enumerate(sample):
             headers = self._normalize_headers(raw_values)
-            non_empty_headers = [header for header in headers if header]
-            if len(non_empty_headers) < 2:
+            header_texts = self._raw_text_values(raw_values)
+            if not header_texts:
                 continue
-            if not self._looks_like_header(non_empty_headers):
+            score = self._score_header_candidate(header_texts, sample, index, len(headers))
+            if score <= 0:
                 continue
-            if not self._has_data_after(sample, index, len(headers)):
-                continue
-            return row_number, headers
 
-        return None
+            if best_candidate is None or score > best_candidate[0]:
+                best_candidate = (score, row_number, headers)
 
-    def _looks_like_header(self, headers: list[str]) -> bool:
-        normalized_headers = {header.casefold() for header in headers}
-        if normalized_headers.intersection(self._KNOWN_HEADER_WORDS):
-            return True
-        if any(len(header) > 60 for header in headers):
-            return False
-        return len(headers) >= 2
+        if best_candidate is None:
+            return None
+        _, row_number, headers = best_candidate
+        return row_number, headers
+
+    def _score_header_candidate(
+        self,
+        header_texts: list[str],
+        sample: list[tuple[int, tuple[object, ...]]],
+        header_index: int,
+        expected_columns: int,
+    ) -> int:
+        if expected_columns <= 0:
+            return 0
+
+        known_words = self._known_words_in_headers(header_texts, self._TABLE_HEADER_WORDS)
+
+        # A long single-cell row is usually a title or description, not a table header.
+        if len(header_texts) == 1 and not known_words and len(header_texts[0]) > 70:
+            return 0
+        if len(header_texts) == 1 and not known_words:
+            return 0
+        if not self._has_data_after(sample, header_index, expected_columns):
+            return 0
+
+        following_data_score = self._following_data_score(sample, header_index, expected_columns)
+        score = len(header_texts) * 2
+        score += len(known_words) * 10
+        score += following_data_score
+
+        if not known_words and following_data_score == 0:
+            return 0
+        return score
 
     def _has_data_after(
         self,
@@ -104,6 +150,25 @@ class OpenpyxlSpreadsheetReader:
             if sum(1 for value in values if value) >= 1:
                 return True
         return True
+
+    def _following_data_score(
+        self,
+        sample: list[tuple[int, tuple[object, ...]]],
+        header_index: int,
+        expected_columns: int,
+    ) -> int:
+        score = 0
+        for _, raw_values in sample[header_index + 1 : header_index + 4]:
+            values = [self._to_text(value) for value in raw_values[:expected_columns]]
+            filled_values = sum(1 for value in values if value)
+            if filled_values >= 2:
+                score += 3
+            elif filled_values == 1:
+                score += 1
+        return score
+
+    def _raw_text_values(self, raw_values: tuple[object, ...]) -> list[str]:
+        return [text for text in (self._to_text(value) for value in raw_values) if text]
 
     def _row_to_dict(
         self,
@@ -145,3 +210,17 @@ class OpenpyxlSpreadsheetReader:
         if isinstance(value, date):
             return value.isoformat()
         return str(value).strip()
+
+    def _known_words_in_headers(self, headers: list[str], known_words: set[str]) -> set[str]:
+        normalized_words = {self._normalize_match_text(word) for word in known_words}
+        matches: set[str] = set()
+        for header in headers:
+            normalized_header = self._normalize_match_text(header)
+            for word in normalized_words:
+                if word and word in normalized_header:
+                    matches.add(word)
+        return matches
+
+    def _normalize_match_text(self, value: str) -> str:
+        normalized = normalize("NFD", value.casefold())
+        return "".join(character for character in normalized if not combining(character))

@@ -103,6 +103,16 @@ O SQLite será usado como banco local da aplicação. A interface gráfica não 
 
 No MVP, o banco local é criado em `data/mala_direta.sqlite3` e possui tabelas para importações e convidados importados.
 
+A persistência separa:
+
+- `workbooks`: cada arquivo `.xlsx` importado.
+- `imports`: cada aba/sheet do arquivo.
+- `guests`: linhas importadas de cada aba.
+- `automatic_guests`: cópias independentes dos registros enviados para a Planilha automática.
+- `app_settings`: pequenas configurações locais, como o nome da Planilha automática.
+
+Ao excluir uma planilha importada, o workbook, suas abas e suas linhas são removidos do SQLite.
+
 ## Planilhas
 
 A leitura de planilhas deve ficar isolada em `app/infrastructure/spreadsheet`. Assim, se no futuro a leitura mudar de pandas para openpyxl puro, a regra de negócio não será afetada.
@@ -118,7 +128,18 @@ Linha 3: Nome | Endereço | Telefone | Obra / Universo
 Linha 4+: Dados
 ```
 
-Cada aba útil é importada como uma lista independente. A interface também possui uma visão automática de selecionados, formada dinamicamente a partir dos convidados marcados nas listas importadas.
+Cada aba com tabela é importada como uma sheet visualizável. Abas com colunas típicas de contato, como `Nome`, `Telefone`, `Email` ou `Endereço`, são tratadas como listas selecionáveis. Abas como `Resumo` continuam visíveis, mas não entram no fluxo de seleção de convidados.
+
+A interface organiza a navegação em dois níveis:
+
+- Abas superiores para arquivos `.xlsx` importados e para a Planilha automática.
+- Abas inferiores para as sheets/listas do arquivo atual.
+
+A planilha automática de selecionados é formada a partir de cópias dos convidados marcados nas listas selecionáveis e aparece como uma guia superior própria quando houver pelo menos um selecionado.
+
+A exclusão e a renomeação de um workbook são acionadas pela interface através do menu de contexto da aba superior do arquivo. A Planilha automática também usa menu de contexto: renomear altera o nome exibido, e excluir limpa a lista final de convidados selecionados sem remover os arquivos importados.
+
+A edição de células em uma sheet importada altera o registro original em `guests.data_json`. A edição na Planilha automática altera apenas a cópia salva em `automatic_guests.data_json`, mantendo a planilha principal intacta.
 
 ## Testes
 

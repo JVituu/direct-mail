@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from pathlib import Path
+from unicodedata import combining, normalize
 
 from app.application.dtos.guest_dto import ImportResultDTO, WorkbookImportResultDTO
 from app.domain.repositories.guest_repository import GuestRepository
@@ -23,6 +24,16 @@ class ImportSpreadsheetUseCase:
         "endereço",
         "contato",
         "contact",
+        "convidado",
+        "convidados",
+        "pessoa",
+        "pessoas",
+        "cliente",
+        "clientes",
+        "participante",
+        "participantes",
+        "destinatario",
+        "destinatário",
     }
 
     def __init__(
@@ -50,9 +61,12 @@ class ImportSpreadsheetUseCase:
         if selected_sheet not in available_sheets:
             raise ValueError(f"A aba '{selected_sheet}' não existe na planilha.")
 
-        result = self._import_sheet(path, selected_sheet, progress_callback)
+        workbook_id = self._guest_repository.create_workbook(str(path))
+        result = self._import_sheet(workbook_id, path, selected_sheet, progress_callback)
         if result.total_rows == 0:
+            self._guest_repository.delete_workbook(workbook_id)
             raise ValueError(f"A aba '{selected_sheet}' não possui registros para importar.")
+        self._guest_repository.update_workbook_total_rows(workbook_id, result.total_rows)
         return result
 
     def execute_workbook(
@@ -66,6 +80,7 @@ class ImportSpreadsheetUseCase:
         if not available_sheets:
             raise ValueError("A planilha não possui abas.")
 
+        workbook_id = self._guest_repository.create_workbook(str(path))
         selected_sheets = sheet_names or available_sheets
         imported_sheets: list[ImportResultDTO] = []
         skipped_sheets: list[str] = []
@@ -76,7 +91,7 @@ class ImportSpreadsheetUseCase:
                 continue
 
             try:
-                result = self._import_sheet(path, selected_sheet, progress_callback)
+                result = self._import_sheet(workbook_id, path, selected_sheet, progress_callback)
             except ValueError:
                 skipped_sheets.append(selected_sheet)
                 continue
@@ -87,11 +102,16 @@ class ImportSpreadsheetUseCase:
             imported_sheets.append(result)
 
         if not imported_sheets:
-            raise ValueError("Nenhuma aba com tabela de contatos foi encontrada.")
+            self._guest_repository.delete_workbook(workbook_id)
+            raise ValueError("Nenhuma aba com tabela foi encontrada.")
+
+        total_rows = sum(result.total_rows for result in imported_sheets)
+        self._guest_repository.update_workbook_total_rows(workbook_id, total_rows)
 
         return WorkbookImportResultDTO(
+            workbook_id=workbook_id,
             file_name=path.name,
-            total_rows=sum(result.total_rows for result in imported_sheets),
+            total_rows=total_rows,
             imported_sheets=tuple(imported_sheets),
             skipped_sheets=tuple(skipped_sheets),
         )
@@ -106,6 +126,7 @@ class ImportSpreadsheetUseCase:
 
     def _import_sheet(
         self,
+        workbook_id: int,
         path: Path,
         selected_sheet: str,
         progress_callback: ProgressCallback | None = None,
@@ -113,13 +134,14 @@ class ImportSpreadsheetUseCase:
         columns = self._spreadsheet_reader.read_headers(str(path), selected_sheet)
         if not columns:
             raise ValueError("A planilha precisa ter uma linha de cabeçalho.")
-        if not self._looks_like_contact_table(columns):
-            raise ValueError(f"A aba '{selected_sheet}' não parece uma lista de contatos.")
+        is_selectable = self._looks_like_contact_table(columns)
 
         import_id = self._guest_repository.create_import(
+            workbook_id=workbook_id,
             file_path=str(path),
             sheet_name=selected_sheet,
             columns=columns,
+            is_selectable=is_selectable,
         )
 
         total_rows = 0
@@ -151,12 +173,30 @@ class ImportSpreadsheetUseCase:
 
         return ImportResultDTO(
             import_id=import_id,
+            workbook_id=workbook_id,
             file_name=path.name,
             sheet_name=selected_sheet,
             total_rows=total_rows,
             columns=tuple(columns),
+            is_selectable=is_selectable,
         )
 
     def _looks_like_contact_table(self, columns: list[str]) -> bool:
-        normalized_columns = {column.casefold() for column in columns}
-        return bool(normalized_columns.intersection(self._CONTACT_HEADER_WORDS))
+        normalized_words = {self._normalize_match_text(word) for word in self._CONTACT_HEADER_WORDS}
+        for column in columns:
+            normalized_column = self._normalize_match_text(column)
+            if any(self._matches_contact_word(normalized_column, word) for word in normalized_words):
+                return True
+        return False
+
+    def _matches_contact_word(self, normalized_column: str, word: str) -> bool:
+        if not word:
+            return False
+        if word in {"contato", "contact"}:
+            tokens = normalized_column.replace("-", " ").replace("/", " ").split()
+            return word in tokens
+        return word in normalized_column
+
+    def _normalize_match_text(self, value: str) -> str:
+        normalized = normalize("NFD", value.casefold())
+        return "".join(character for character in normalized if not combining(character))

@@ -107,7 +107,8 @@ A persistência separa:
 
 - `workbooks`: cada arquivo `.xlsx` importado.
 - `imports`: cada aba/sheet do arquivo.
-- `guests`: linhas importadas de cada aba.
+- `guests`: linhas importadas de cada aba, incluindo o `verification_code` criado pelo sistema.
+- `guest_identities`: chaves normalizadas de nome, telefone e e-mail usadas para detectar duplicidades.
 - `automatic_guests`: cópias independentes dos registros enviados para a Planilha automática.
 - `app_settings`: pequenas configurações locais, como o nome da Planilha automática.
 
@@ -140,6 +141,10 @@ A planilha automática de selecionados é formada a partir de cópias dos convid
 A exclusão e a renomeação de um workbook são acionadas pela interface através do menu de contexto da aba superior do arquivo. A Planilha automática também usa menu de contexto: renomear altera o nome exibido, e excluir limpa a lista final de convidados selecionados sem remover os arquivos importados.
 
 A edição de células em uma sheet importada altera o registro original em `guests.data_json`. A edição na Planilha automática altera apenas a cópia salva em `automatic_guests.data_json`, mantendo a planilha principal intacta.
+
+Cada linha importada recebe um `verification_code` numérico único, gerado pela aplicação e persistido no SQLite. Esse código é exibido como coluna de sistema, pode ser usado na busca e não faz parte das colunas originais do Excel.
+
+A detecção de duplicidades usa uma tabela auxiliar com identidade normalizada. A comparação prioriza e-mail, depois telefone, depois nome normalizado. Duplicados são apenas sinalizados na coluna `Duplicidade` e na aba superior `Duplicados`; nenhuma linha é excluída, unificada ou alterada automaticamente.
 
 ## Testes
 

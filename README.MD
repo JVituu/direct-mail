@@ -101,13 +101,15 @@ O MVP atual permite:
 3. Renomear ou excluir uma planilha importada pelo botão direito na aba superior.
 4. Mostrar as abas internas do Excel, como Resumo, Amigos, Família, Jornalistas ou Políticos.
 5. Detectar tabelas que possuem título e observação antes do cabeçalho.
-6. Visualizar os registros com paginação.
-7. Buscar texto em qualquer coluna importada.
-8. Editar dados importados diretamente na tabela.
-9. Filtrar listas/abas pelo botão `Filtros`.
-10. Selecionar convidados pela coluna `Selecionado`, por página, por filtro ou pelo botão `Selecionar todos`.
-11. Visualizar a planilha automática de selecionados como uma guia superior própria.
-12. Exportar os convidados selecionados para um novo `.xlsx`.
+6. Gerar um `Código` único do sistema para cada linha importada.
+7. Identificar possíveis duplicados entre planilhas importadas.
+8. Visualizar os registros com paginação.
+9. Buscar texto em qualquer coluna importada ou pelo `Código`.
+10. Editar dados importados diretamente na tabela.
+11. Filtrar listas/abas pelo botão `Filtros`.
+12. Selecionar convidados pela coluna `Selecionado`, por página, por filtro ou pelo botão `Selecionar todos`.
+13. Visualizar a planilha automática de selecionados como uma guia superior própria.
+14. Exportar os convidados selecionados para um novo `.xlsx`.
 
 O banco local é criado automaticamente em `data/mala_direta.sqlite3`.
 
@@ -116,6 +118,10 @@ Arquivos já importados ficam salvos no banco local. Para renomear ou remover um
 A guia superior `Planilha automática` aparece quando existir pelo menos um convidado selecionado. Ela é atualizada em tempo real e também pode ser renomeada ou excluída pelo botão direito. Excluir essa guia limpa a lista final de selecionados, sem remover as planilhas importadas.
 
 As células de dados podem ser editadas com duplo clique ou F2. A Planilha automática guarda uma cópia independente dos nomes selecionados, então alterações feitas nela não modificam a planilha principal. Na planilha principal, linhas selecionadas ficam destacadas em verde.
+
+A coluna `Código` é criada pelo próprio aplicativo durante a importação. Ela não vem do Excel, não é editável e não se repete entre linhas salvas no sistema.
+
+A coluna `Duplicidade` sinaliza possíveis pessoas repetidas usando e-mail, telefone ou nome normalizado. O sistema não apaga nem mescla registros automaticamente; ele apenas mostra a suspeita e cria a aba superior `Duplicados` quando existir algo para revisar.
 
 ## Testes
 

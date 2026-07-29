@@ -66,6 +66,7 @@ class GuestRepository(Protocol):
         import_id: int | None,
         workbook_id: int | None = None,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> int:
         raise NotImplementedError
 
@@ -74,6 +75,7 @@ class GuestRepository(Protocol):
         import_id: int | None = None,
         workbook_id: int | None = None,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> int:
         raise NotImplementedError
 
@@ -100,6 +102,7 @@ class GuestRepository(Protocol):
         offset: int,
         search: str = "",
         selected_only: bool = False,
+        duplicates_only: bool = False,
     ) -> list[GuestRecord]:
         raise NotImplementedError
 
@@ -110,7 +113,14 @@ class GuestRepository(Protocol):
         limit: int,
         offset: int,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> list[GuestRecord]:
+        raise NotImplementedError
+
+    def list_duplicate_candidates(self, guest_id: int) -> list[GuestRecord]:
+        raise NotImplementedError
+
+    def list_automatic_conflicts(self, guest_id: int) -> list[GuestRecord]:
         raise NotImplementedError
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:

@@ -62,6 +62,7 @@ class ListGuestsUseCase:
         page_size: int,
         search: str = "",
         selected_only: bool = False,
+        duplicates_only: bool = False,
     ) -> GuestPageDTO:
         imported_file = self._guest_repository.get_import(import_id) if import_id is not None else None
         if import_id is not None and imported_file is None:
@@ -70,10 +71,20 @@ class ListGuestsUseCase:
         safe_page = max(page, 0)
         safe_page_size = min(max(page_size, 50), 5000)
         if selected_only:
-            total_rows = self._guest_repository.count_automatic_guests(import_id, workbook_id, search)
+            total_rows = self._guest_repository.count_automatic_guests(
+                import_id,
+                workbook_id,
+                search,
+                duplicates_only=duplicates_only,
+            )
             selected_rows = total_rows
         else:
-            total_rows = self._guest_repository.count_guests(import_id, workbook_id, search)
+            total_rows = self._guest_repository.count_guests(
+                import_id,
+                workbook_id,
+                search,
+                duplicates_only=duplicates_only,
+            )
             selected_rows = self._guest_repository.count_selected_guests(import_id, workbook_id, search)
         offset = safe_page * safe_page_size
         columns = self._guest_repository.get_columns(import_id, workbook_id)
@@ -88,6 +99,7 @@ class ListGuestsUseCase:
                 limit=safe_page_size,
                 offset=offset,
                 search=search,
+                duplicates_only=duplicates_only,
             )
         else:
             rows = self._guest_repository.list_guests(
@@ -97,6 +109,7 @@ class ListGuestsUseCase:
                 offset=offset,
                 search=search,
                 selected_only=False,
+                duplicates_only=duplicates_only,
             )
 
         guest_rows = [
@@ -105,9 +118,12 @@ class ListGuestsUseCase:
                 import_id=row.import_id,
                 sheet_name=row.sheet_name,
                 row_number=row.row_number,
+                verification_code=row.verification_code,
                 data=self._to_display_data(row.sheet_name, row.data, include_list_column),
                 selected=row.selected,
                 selectable=row.selectable,
+                duplicate_reason=row.duplicate_reason,
+                duplicate_count=row.duplicate_count,
             )
             for row in rows
         ]

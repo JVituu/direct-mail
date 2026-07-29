@@ -2,6 +2,9 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 import json
 from pathlib import Path
+import re
+import secrets
+from unicodedata import combining, normalize
 
 from app.domain.entities.guest_record import GuestRecord
 from app.domain.entities.imported_workbook import ImportedWorkbook
@@ -12,6 +15,47 @@ from app.infrastructure.database.connection import connect
 
 AUTOMATIC_SHEET_NAME_KEY = "automatic_sheet_name"
 DEFAULT_AUTOMATIC_SHEET_NAME = "Planilha automática"
+MIN_VERIFICATION_CODE = 10_000_000
+MAX_VERIFICATION_CODE = 99_999_999
+NAME_HEADER_WORDS = {
+    "nome",
+    "name",
+    "convidado",
+    "convidados",
+    "pessoa",
+    "pessoas",
+    "cliente",
+    "clientes",
+    "participante",
+    "participantes",
+    "destinatario",
+    "destinatário",
+}
+EMAIL_HEADER_WORDS = {"email", "e-mail", "mail"}
+PHONE_HEADER_WORDS = {"telefone", "phone", "celular", "whatsapp", "fone", "tel"}
+NAME_PARTICLES = {"da", "de", "do", "das", "dos", "e"}
+WEAK_NAME_KEYS = {
+    "acompanhante",
+    "casal",
+    "convidada",
+    "convidado",
+    "esposa",
+    "esposo",
+    "filha",
+    "filho",
+    "filhas",
+    "filhos",
+    "marido",
+    "mulher",
+    "nao",
+    "sim",
+    "senhor",
+    "senhora",
+    "sr",
+    "sr sra",
+    "sra",
+    "sra sr",
+}
 
 
 class SqliteGuestRepository:
@@ -49,6 +93,7 @@ class SqliteGuestRepository:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     import_id INTEGER NOT NULL,
                     row_number INTEGER NOT NULL,
+                    verification_code TEXT NOT NULL UNIQUE,
                     data_json TEXT NOT NULL,
                     selected INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE CASCADE
@@ -59,10 +104,19 @@ class SqliteGuestRepository:
                     source_import_id INTEGER NOT NULL,
                     sheet_name TEXT NOT NULL,
                     row_number INTEGER NOT NULL,
+                    verification_code TEXT NOT NULL,
                     data_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (source_guest_id) REFERENCES guests(id) ON DELETE CASCADE,
                     FOREIGN KEY (source_import_id) REFERENCES imports(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS guest_identities (
+                    guest_id INTEGER PRIMARY KEY,
+                    name_key TEXT NOT NULL DEFAULT '',
+                    phone_key TEXT NOT NULL DEFAULT '',
+                    email_key TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (guest_id) REFERENCES guests(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -83,8 +137,23 @@ class SqliteGuestRepository:
                 CREATE INDEX IF NOT EXISTS idx_guests_import_selected
                     ON guests(import_id, selected);
 
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_verification_code
+                    ON guests(verification_code);
+
                 CREATE INDEX IF NOT EXISTS idx_automatic_guests_import_id
                     ON automatic_guests(source_import_id);
+
+                CREATE INDEX IF NOT EXISTS idx_automatic_guests_verification_code
+                    ON automatic_guests(verification_code);
+
+                CREATE INDEX IF NOT EXISTS idx_guest_identities_name
+                    ON guest_identities(name_key);
+
+                CREATE INDEX IF NOT EXISTS idx_guest_identities_phone
+                    ON guest_identities(phone_key);
+
+                CREATE INDEX IF NOT EXISTS idx_guest_identities_email
+                    ON guest_identities(email_key);
                 """
             )
 
@@ -269,29 +338,32 @@ class SqliteGuestRepository:
         if not rows:
             return
 
-        payload = [
-            (
-                import_id,
-                row.row_number,
-                json.dumps(row.values, ensure_ascii=False),
-            )
-            for row in rows
-        ]
-
         with connect(self._database_path) as connection:
+            verification_codes = self._generate_unique_verification_codes(connection, len(rows))
+            payload = [
+                (
+                    import_id,
+                    row.row_number,
+                    verification_codes[index],
+                    json.dumps(row.values, ensure_ascii=False),
+                )
+                for index, row in enumerate(rows)
+            ]
             connection.executemany(
                 """
-                INSERT INTO guests (import_id, row_number, data_json)
-                VALUES (?, ?, ?)
+                INSERT INTO guests (import_id, row_number, verification_code, data_json)
+                VALUES (?, ?, ?, ?)
                 """,
                 payload,
             )
+            self._upsert_guest_identities(connection, import_id)
 
     def count_guests(
         self,
         import_id: int | None,
         workbook_id: int | None = None,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> int:
         query = """
             SELECT COUNT(*)
@@ -301,6 +373,8 @@ class SqliteGuestRepository:
         """
         params: list[object] = []
         query, params = self._apply_guest_filters(query, params, import_id, workbook_id, search=search)
+        if duplicates_only:
+            query = self._apply_duplicate_filter(query, "guests.id")
 
         with connect(self._database_path) as connection:
             return int(connection.execute(query, params).fetchone()[0])
@@ -328,6 +402,7 @@ class SqliteGuestRepository:
         import_id: int | None = None,
         workbook_id: int | None = None,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> int:
         query = """
             SELECT COUNT(*)
@@ -343,6 +418,8 @@ class SqliteGuestRepository:
             workbook_id,
             search=search,
         )
+        if duplicates_only:
+            query = self._apply_duplicate_filter(query, "automatic_guests.source_guest_id")
 
         with connect(self._database_path) as connection:
             return int(connection.execute(query, params).fetchone()[0])
@@ -377,6 +454,7 @@ class SqliteGuestRepository:
         offset: int,
         search: str = "",
         selected_only: bool = False,
+        duplicates_only: bool = False,
     ) -> list[GuestRecord]:
         query = """
             SELECT
@@ -385,6 +463,7 @@ class SqliteGuestRepository:
                 imports.sheet_name,
                 imports.is_selectable,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 guests.selected
             FROM guests
@@ -395,13 +474,17 @@ class SqliteGuestRepository:
         if selected_only:
             query += " AND guests.selected = 1"
         query, params = self._apply_guest_filters(query, params, import_id, workbook_id, search=search)
+        if duplicates_only:
+            query = self._apply_duplicate_filter(query, "guests.id")
         query += " ORDER BY imports.id, guests.row_number LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with connect(self._database_path) as connection:
             rows = connection.execute(query, params).fetchall()
+            guests = [self._to_guest(row) for row in rows]
+            self._apply_duplicate_summaries(connection, guests)
 
-        return [self._to_guest(row) for row in rows]
+        return guests
 
     def list_automatic_guests(
         self,
@@ -410,6 +493,7 @@ class SqliteGuestRepository:
         limit: int,
         offset: int,
         search: str = "",
+        duplicates_only: bool = False,
     ) -> list[GuestRecord]:
         query = """
             SELECT
@@ -418,6 +502,7 @@ class SqliteGuestRepository:
                 automatic_guests.sheet_name,
                 1 AS is_selectable,
                 automatic_guests.row_number,
+                automatic_guests.verification_code,
                 automatic_guests.data_json,
                 1 AS selected
             FROM automatic_guests
@@ -432,13 +517,106 @@ class SqliteGuestRepository:
             workbook_id,
             search=search,
         )
+        if duplicates_only:
+            query = self._apply_duplicate_filter(query, "automatic_guests.source_guest_id")
         query += " ORDER BY automatic_guests.source_import_id, automatic_guests.row_number LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with connect(self._database_path) as connection:
             rows = connection.execute(query, params).fetchall()
+            guests = [self._to_guest(row) for row in rows]
+            self._apply_duplicate_summaries(connection, guests)
 
-        return [self._to_guest(row) for row in rows]
+        return guests
+
+    def list_duplicate_candidates(self, guest_id: int) -> list[GuestRecord]:
+        with connect(self._database_path) as connection:
+            identity = self._identity_for_guest_id(connection, guest_id)
+            if identity is None or not any(identity.values()):
+                return []
+
+            rows = connection.execute(
+                """
+                SELECT
+                    guests.id,
+                    guests.import_id,
+                    imports.sheet_name,
+                    imports.is_selectable,
+                    guests.row_number,
+                    guests.verification_code,
+                    guests.data_json,
+                    guests.selected
+                FROM guests
+                JOIN imports ON imports.id = guests.import_id
+                JOIN guest_identities identities ON identities.guest_id = guests.id
+                WHERE imports.is_selectable = 1
+                AND (
+                    (? != '' AND identities.email_key = ?)
+                    OR (? != '' AND identities.phone_key = ?)
+                    OR (? != '' AND identities.name_key = ?)
+                )
+                ORDER BY
+                    CASE WHEN guests.id = ? THEN 0 ELSE 1 END,
+                    imports.id,
+                    guests.row_number
+                """,
+                (
+                    identity["email_key"],
+                    identity["email_key"],
+                    identity["phone_key"],
+                    identity["phone_key"],
+                    identity["name_key"],
+                    identity["name_key"],
+                    guest_id,
+                ),
+            ).fetchall()
+            guests = [self._to_guest(row) for row in rows]
+            self._apply_duplicate_summaries(connection, guests)
+
+        return guests
+
+    def list_automatic_conflicts(self, guest_id: int) -> list[GuestRecord]:
+        with connect(self._database_path) as connection:
+            identity = self._identity_for_guest_id(connection, guest_id)
+            if identity is None or not any(identity.values()):
+                return []
+
+            rows = connection.execute(
+                """
+                SELECT
+                    automatic_guests.source_guest_id AS id,
+                    automatic_guests.source_import_id AS import_id,
+                    automatic_guests.sheet_name,
+                    1 AS is_selectable,
+                    automatic_guests.row_number,
+                    automatic_guests.verification_code,
+                    automatic_guests.data_json,
+                    1 AS selected
+                FROM automatic_guests
+                JOIN imports ON imports.id = automatic_guests.source_import_id
+                JOIN guest_identities identities ON identities.guest_id = automatic_guests.source_guest_id
+                WHERE automatic_guests.source_guest_id != ?
+                AND (
+                    (? != '' AND identities.email_key = ?)
+                    OR (? != '' AND identities.phone_key = ?)
+                    OR (? != '' AND identities.name_key = ?)
+                )
+                ORDER BY automatic_guests.source_import_id, automatic_guests.row_number
+                """,
+                (
+                    guest_id,
+                    identity["email_key"],
+                    identity["email_key"],
+                    identity["phone_key"],
+                    identity["phone_key"],
+                    identity["name_key"],
+                    identity["name_key"],
+                ),
+            ).fetchall()
+            guests = [self._to_guest(row) for row in rows]
+            self._apply_duplicate_summaries(connection, guests)
+
+        return guests
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         with connect(self._database_path) as connection:
@@ -479,6 +657,7 @@ class SqliteGuestRepository:
                 "UPDATE guests SET data_json = ? WHERE id = ?",
                 (json.dumps(data, ensure_ascii=False), guest_id),
             )
+            self._upsert_guest_identity(connection, guest_id)
 
     def update_automatic_guest_data(self, source_guest_id: int, column_name: str, value: str) -> None:
         with connect(self._database_path) as connection:
@@ -563,6 +742,7 @@ class SqliteGuestRepository:
                 imports.sheet_name,
                 imports.is_selectable,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 guests.selected
             FROM guests
@@ -590,6 +770,7 @@ class SqliteGuestRepository:
                 automatic_guests.sheet_name,
                 1 AS is_selectable,
                 automatic_guests.row_number,
+                automatic_guests.verification_code,
                 automatic_guests.data_json,
                 1 AS selected
             FROM automatic_guests
@@ -613,6 +794,7 @@ class SqliteGuestRepository:
                 source_import_id,
                 sheet_name,
                 row_number,
+                verification_code,
                 data_json,
                 created_at
             )
@@ -621,6 +803,7 @@ class SqliteGuestRepository:
                 guests.import_id,
                 imports.sheet_name,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -654,6 +837,7 @@ class SqliteGuestRepository:
                 source_import_id,
                 sheet_name,
                 row_number,
+                verification_code,
                 data_json,
                 created_at
             )
@@ -662,6 +846,7 @@ class SqliteGuestRepository:
                 guests.import_id,
                 imports.sheet_name,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -693,6 +878,7 @@ class SqliteGuestRepository:
                 source_import_id,
                 sheet_name,
                 row_number,
+                verification_code,
                 data_json,
                 created_at
             )
@@ -701,6 +887,7 @@ class SqliteGuestRepository:
                 guests.import_id,
                 imports.sheet_name,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -726,8 +913,9 @@ class SqliteGuestRepository:
             query += " AND imports.workbook_id = ?"
             params.append(workbook_id)
         if search.strip():
-            query += " AND guests.data_json LIKE ?"
-            params.append(f"%{search.strip()}%")
+            query += " AND (guests.data_json LIKE ? OR guests.verification_code LIKE ?)"
+            search_value = f"%{search.strip()}%"
+            params.extend([search_value, search_value])
         return query, params
 
     def _apply_automatic_guest_filters(
@@ -745,10 +933,169 @@ class SqliteGuestRepository:
             query += " AND imports.workbook_id = ?"
             params.append(workbook_id)
         if search.strip():
-            query += " AND (automatic_guests.data_json LIKE ? OR automatic_guests.sheet_name LIKE ?)"
+            query += """
+                AND (
+                    automatic_guests.data_json LIKE ?
+                    OR automatic_guests.sheet_name LIKE ?
+                    OR automatic_guests.verification_code LIKE ?
+                )
+            """
             search_value = f"%{search.strip()}%"
-            params.extend([search_value, search_value])
+            params.extend([search_value, search_value, search_value])
         return query, params
+
+    def _apply_duplicate_filter(self, query: str, guest_id_expression: str) -> str:
+        return (
+            query
+            + f"""
+            AND EXISTS (
+                SELECT 1
+                FROM guest_identities current_identity
+                WHERE current_identity.guest_id = {guest_id_expression}
+                AND (
+                    (
+                        current_identity.email_key != ''
+                        AND EXISTS (
+                            SELECT 1
+                            FROM guest_identities other_identity
+                            JOIN guests other_guest ON other_guest.id = other_identity.guest_id
+                            JOIN imports other_import ON other_import.id = other_guest.import_id
+                            WHERE other_identity.guest_id != current_identity.guest_id
+                            AND other_identity.email_key = current_identity.email_key
+                            AND other_import.is_selectable = 1
+                        )
+                    )
+                    OR (
+                        current_identity.phone_key != ''
+                        AND EXISTS (
+                            SELECT 1
+                            FROM guest_identities other_identity
+                            JOIN guests other_guest ON other_guest.id = other_identity.guest_id
+                            JOIN imports other_import ON other_import.id = other_guest.import_id
+                            WHERE other_identity.guest_id != current_identity.guest_id
+                            AND other_identity.phone_key = current_identity.phone_key
+                            AND other_import.is_selectable = 1
+                        )
+                    )
+                    OR (
+                        current_identity.name_key != ''
+                        AND EXISTS (
+                            SELECT 1
+                            FROM guest_identities other_identity
+                            JOIN guests other_guest ON other_guest.id = other_identity.guest_id
+                            JOIN imports other_import ON other_import.id = other_guest.import_id
+                            WHERE other_identity.guest_id != current_identity.guest_id
+                            AND other_identity.name_key = current_identity.name_key
+                            AND other_import.is_selectable = 1
+                        )
+                    )
+                )
+            )
+            """
+        )
+
+    def _apply_duplicate_summaries(
+        self,
+        connection: object,
+        guests: list[GuestRecord],
+    ) -> None:
+        guest_ids = [guest.id for guest in guests if guest.id is not None]
+        if not guest_ids:
+            return
+
+        identities = self._identities_for_guest_ids(connection, guest_ids)
+        if not identities:
+            return
+
+        email_counts = self._identity_counts(connection, "email_key", {identity["email_key"] for identity in identities.values()})
+        phone_counts = self._identity_counts(connection, "phone_key", {identity["phone_key"] for identity in identities.values()})
+        name_counts = self._identity_counts(connection, "name_key", {identity["name_key"] for identity in identities.values()})
+
+        for guest in guests:
+            if guest.id is None or guest.id not in identities:
+                continue
+
+            identity = identities[guest.id]
+            reason = ""
+            duplicate_count = 0
+            if identity["email_key"] and email_counts.get(identity["email_key"], 0) > 1:
+                reason = "E-mail"
+                duplicate_count = email_counts[identity["email_key"]]
+            elif identity["phone_key"] and phone_counts.get(identity["phone_key"], 0) > 1:
+                reason = "Telefone"
+                duplicate_count = phone_counts[identity["phone_key"]]
+            elif identity["name_key"] and name_counts.get(identity["name_key"], 0) > 1:
+                reason = "Nome"
+                duplicate_count = name_counts[identity["name_key"]]
+
+            guest.duplicate_reason = reason
+            guest.duplicate_count = duplicate_count
+
+    def _identity_for_guest_id(self, connection: object, guest_id: int) -> dict[str, str] | None:
+        row = connection.execute(
+            """
+            SELECT guest_id, name_key, phone_key, email_key
+            FROM guest_identities
+            WHERE guest_id = ?
+            """,
+            (guest_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "name_key": str(row["name_key"]),
+            "phone_key": str(row["phone_key"]),
+            "email_key": str(row["email_key"]),
+        }
+
+    def _identities_for_guest_ids(
+        self,
+        connection: object,
+        guest_ids: Sequence[int],
+    ) -> dict[int, dict[str, str]]:
+        placeholders = ", ".join("?" for _ in guest_ids)
+        rows = connection.execute(
+            f"""
+            SELECT guest_id, name_key, phone_key, email_key
+            FROM guest_identities
+            WHERE guest_id IN ({placeholders})
+            """,
+            list(guest_ids),
+        ).fetchall()
+        return {
+            int(row["guest_id"]): {
+                "name_key": str(row["name_key"]),
+                "phone_key": str(row["phone_key"]),
+                "email_key": str(row["email_key"]),
+            }
+            for row in rows
+        }
+
+    def _identity_counts(
+        self,
+        connection: object,
+        column_name: str,
+        keys: set[str],
+    ) -> dict[str, int]:
+        clean_keys = {key for key in keys if key}
+        if not clean_keys:
+            return {}
+
+        placeholders = ", ".join("?" for _ in clean_keys)
+        rows = connection.execute(
+            f"""
+            SELECT guest_identities.{column_name} AS identity_key, COUNT(*) AS total
+            FROM guest_identities
+            JOIN guests ON guests.id = guest_identities.guest_id
+            JOIN imports ON imports.id = guests.import_id
+            WHERE guest_identities.{column_name} IN ({placeholders})
+            AND guest_identities.{column_name} != ''
+            AND imports.is_selectable = 1
+            GROUP BY guest_identities.{column_name}
+            """,
+            list(clean_keys),
+        ).fetchall()
+        return {str(row["identity_key"]): int(row["total"]) for row in rows}
 
     def _migrate_schema(self, connection: object) -> None:
         import_columns = self._table_columns(connection, "imports")
@@ -756,12 +1103,21 @@ class SqliteGuestRepository:
             connection.execute("ALTER TABLE imports ADD COLUMN workbook_id INTEGER")
         if "is_selectable" not in import_columns:
             connection.execute("ALTER TABLE imports ADD COLUMN is_selectable INTEGER NOT NULL DEFAULT 1")
+        guest_columns = self._table_columns(connection, "guests")
+        if "verification_code" not in guest_columns:
+            connection.execute("ALTER TABLE guests ADD COLUMN verification_code TEXT")
+        automatic_columns = self._table_columns(connection, "automatic_guests")
+        if "verification_code" not in automatic_columns:
+            connection.execute("ALTER TABLE automatic_guests ADD COLUMN verification_code TEXT")
         workbook_columns = self._table_columns(connection, "workbooks")
         if "display_name" not in workbook_columns:
             connection.execute("ALTER TABLE workbooks ADD COLUMN display_name TEXT")
             connection.execute("UPDATE workbooks SET display_name = file_name WHERE display_name IS NULL")
         self._migrate_existing_imports(connection)
+        self._migrate_guest_verification_codes(connection)
+        self._upsert_guest_identities(connection)
         self._migrate_existing_automatic_guests(connection)
+        self._migrate_automatic_verification_codes(connection)
 
     def _migrate_existing_imports(self, connection: object) -> None:
         rows = connection.execute(
@@ -791,6 +1147,28 @@ class SqliteGuestRepository:
                 (cursor.lastrowid, row["id"]),
             )
 
+    def _migrate_guest_verification_codes(self, connection: object) -> None:
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM guests
+            WHERE verification_code IS NULL
+            OR TRIM(verification_code) = ''
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        if not rows:
+            return
+
+        verification_codes = self._generate_unique_verification_codes(connection, len(rows))
+        connection.executemany(
+            "UPDATE guests SET verification_code = ? WHERE id = ?",
+            [
+                (verification_codes[index], row["id"])
+                for index, row in enumerate(rows)
+            ],
+        )
+
     def _migrate_existing_automatic_guests(self, connection: object) -> None:
         connection.execute(
             """
@@ -799,6 +1177,7 @@ class SqliteGuestRepository:
                 source_import_id,
                 sheet_name,
                 row_number,
+                verification_code,
                 data_json,
                 created_at
             )
@@ -807,6 +1186,7 @@ class SqliteGuestRepository:
                 guests.import_id,
                 imports.sheet_name,
                 guests.row_number,
+                guests.verification_code,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -815,6 +1195,177 @@ class SqliteGuestRepository:
             AND imports.is_selectable = 1
             """
         )
+
+    def _migrate_automatic_verification_codes(self, connection: object) -> None:
+        connection.execute(
+            """
+            UPDATE automatic_guests
+            SET verification_code = (
+                SELECT guests.verification_code
+                FROM guests
+                WHERE guests.id = automatic_guests.source_guest_id
+            )
+            WHERE verification_code IS NULL
+            OR TRIM(verification_code) = ''
+            """
+        )
+
+    def _upsert_guest_identities(self, connection: object, import_id: int | None = None) -> None:
+        query = """
+            SELECT guests.id, guests.data_json
+            FROM guests
+            JOIN imports ON imports.id = guests.import_id
+            WHERE imports.is_selectable = 1
+        """
+        params: list[object] = []
+        if import_id is not None:
+            query += " AND guests.import_id = ?"
+            params.append(import_id)
+
+        rows = connection.execute(query, params).fetchall()
+        payload = []
+        for row in rows:
+            data = json.loads(row["data_json"])
+            identity = self._extract_identity(data)
+            payload.append(
+                (
+                    row["id"],
+                    identity["name_key"],
+                    identity["phone_key"],
+                    identity["email_key"],
+                )
+            )
+
+        if not payload:
+            return
+
+        connection.executemany(
+            """
+            INSERT INTO guest_identities (guest_id, name_key, phone_key, email_key)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guest_id) DO UPDATE SET
+                name_key = excluded.name_key,
+                phone_key = excluded.phone_key,
+                email_key = excluded.email_key
+            """,
+            payload,
+        )
+
+    def _upsert_guest_identity(self, connection: object, guest_id: int) -> None:
+        row = connection.execute(
+            """
+            SELECT guests.data_json
+            FROM guests
+            JOIN imports ON imports.id = guests.import_id
+            WHERE guests.id = ?
+            AND imports.is_selectable = 1
+            """,
+            (guest_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        identity = self._extract_identity(json.loads(row["data_json"]))
+        connection.execute(
+            """
+            INSERT INTO guest_identities (guest_id, name_key, phone_key, email_key)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guest_id) DO UPDATE SET
+                name_key = excluded.name_key,
+                phone_key = excluded.phone_key,
+                email_key = excluded.email_key
+            """,
+            (
+                guest_id,
+                identity["name_key"],
+                identity["phone_key"],
+                identity["email_key"],
+            ),
+        )
+
+    def _extract_identity(self, data: dict[str, str]) -> dict[str, str]:
+        name_value = self._find_value_by_headers(data, NAME_HEADER_WORDS)
+        phone_value = self._find_value_by_headers(data, PHONE_HEADER_WORDS)
+        email_value = self._find_value_by_headers(data, EMAIL_HEADER_WORDS) or self._find_email_in_values(data)
+
+        return {
+            "name_key": self._normalize_name_key(name_value),
+            "phone_key": self._normalize_phone_key(phone_value),
+            "email_key": self._normalize_email_key(email_value),
+        }
+
+    def _find_value_by_headers(self, data: dict[str, str], header_words: set[str]) -> str:
+        normalized_words = {self._normalize_match_text(word) for word in header_words}
+        for column_name, value in data.items():
+            normalized_column = self._normalize_match_text(column_name)
+            if any(word and word in normalized_column for word in normalized_words):
+                return str(value)
+        return ""
+
+    def _find_email_in_values(self, data: dict[str, str]) -> str:
+        for value in data.values():
+            match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", str(value))
+            if match:
+                return match.group(0)
+        return ""
+
+    def _normalize_name_key(self, value: str) -> str:
+        normalized = self._normalize_match_text(value)
+        tokens = [
+            token
+            for token in re.sub(r"[^a-z0-9 ]+", " ", normalized).split()
+            if token not in NAME_PARTICLES
+        ]
+        key = " ".join(tokens)
+        if len(tokens) < 2 or key in WEAK_NAME_KEYS:
+            return ""
+        return key
+
+    def _normalize_phone_key(self, value: str) -> str:
+        digits = re.sub(r"\D+", "", str(value))
+        if len(digits) < 8:
+            return ""
+        return digits[-11:] if len(digits) > 11 else digits
+
+    def _normalize_email_key(self, value: str) -> str:
+        return str(value).strip().casefold()
+
+    def _normalize_match_text(self, value: str) -> str:
+        normalized = normalize("NFD", str(value).casefold())
+        return "".join(character for character in normalized if not combining(character))
+
+    def _generate_unique_verification_codes(self, connection: object, amount: int) -> list[str]:
+        if amount <= 0:
+            return []
+
+        existing_codes = self._existing_verification_codes(connection)
+        available_codes = MAX_VERIFICATION_CODE - MIN_VERIFICATION_CODE + 1 - len(existing_codes)
+        if amount > available_codes:
+            raise RuntimeError("Não há códigos de verificação disponíveis.")
+
+        generated_codes: list[str] = []
+        while len(generated_codes) < amount:
+            candidate = self._generate_verification_code()
+            if candidate in existing_codes:
+                continue
+            existing_codes.add(candidate)
+            generated_codes.append(candidate)
+        return generated_codes
+
+    def _existing_verification_codes(self, connection: object) -> set[str]:
+        rows = connection.execute(
+            """
+            SELECT verification_code
+            FROM guests
+            WHERE verification_code IS NOT NULL
+            AND TRIM(verification_code) != ''
+            """
+        ).fetchall()
+        return {str(row["verification_code"]) for row in rows}
+
+    def _generate_verification_code(self) -> str:
+        code_range = MAX_VERIFICATION_CODE - MIN_VERIFICATION_CODE + 1
+        return str(MIN_VERIFICATION_CODE + secrets.randbelow(code_range))
 
     def _table_columns(self, connection: object, table_name: str) -> set[str]:
         rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -849,6 +1400,7 @@ class SqliteGuestRepository:
             import_id=int(row["import_id"]),
             sheet_name=str(row["sheet_name"]),
             row_number=int(row["row_number"]),
+            verification_code=str(row["verification_code"]),
             data=json.loads(row["data_json"]),
             selected=bool(row["selected"]),
             selectable=bool(row["is_selectable"]),

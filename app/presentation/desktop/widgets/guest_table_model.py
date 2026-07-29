@@ -32,7 +32,7 @@ class GuestTableModel(QAbstractTableModel):
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
             return 0
-        return len(self._columns) + 2
+        return len(self._columns) + 4
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> object:
         if not index.isValid():
@@ -42,7 +42,7 @@ class GuestTableModel(QAbstractTableModel):
         column = index.column()
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if column in (0, 1):
+            if column in (0, 1, 2, 3):
                 return Qt.AlignmentFlag.AlignCenter
             return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 
@@ -54,6 +54,14 @@ class GuestTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole and column == 0 and row.selected:
             return QBrush(QColor("#126c50"))
 
+        if role == Qt.ItemDataRole.FontRole and column == 2 and row.duplicate_count > 1:
+            font = QFont()
+            font.setBold(True)
+            return font
+
+        if role == Qt.ItemDataRole.ForegroundRole and column == 2 and row.duplicate_count > 1:
+            return QBrush(QColor("#9a4d00"))
+
         if role == Qt.ItemDataRole.BackgroundRole and self._highlight_selected_rows and row.selected:
             return QBrush(QColor("#e1f5e8"))
 
@@ -63,9 +71,15 @@ class GuestTableModel(QAbstractTableModel):
         if column == 0:
             return "X" if row.selected and row.selectable else ""
         if column == 1:
+            return row.verification_code
+        if column == 2:
+            if row.duplicate_count > 1:
+                return f"{row.duplicate_reason} ({row.duplicate_count})"
+            return ""
+        if column == 3:
             return str(row.row_number)
 
-        data_column = self._columns[column - 2]
+        data_column = self._columns[column - 4]
         return row.data.get(data_column, "")
 
     def headerData(
@@ -83,8 +97,12 @@ class GuestTableModel(QAbstractTableModel):
         if section == 0:
             return "Selecionado"
         if section == 1:
+            return "Código"
+        if section == 2:
+            return "Duplicidade"
+        if section == 3:
             return "Linha"
-        return self._columns[section - 2]
+        return self._columns[section - 4]
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
@@ -111,7 +129,7 @@ class GuestTableModel(QAbstractTableModel):
             return False
 
         row = self._rows[index.row()]
-        column_name = self._columns[index.column() - 2]
+        column_name = self._columns[index.column() - 4]
         new_value = "" if value is None else str(value).strip()
         if row.data.get(column_name, "") == new_value:
             return True
@@ -145,9 +163,9 @@ class GuestTableModel(QAbstractTableModel):
         return True
 
     def _is_editable_data_cell(self, index: QModelIndex) -> bool:
-        if not index.isValid() or index.column() < 2:
+        if not index.isValid() or index.column() < 4:
             return False
-        column_name = self._columns[index.column() - 2]
+        column_name = self._columns[index.column() - 4]
         return column_name in self._editable_columns
 
     def toggle_selection(self, row_index: int) -> bool:

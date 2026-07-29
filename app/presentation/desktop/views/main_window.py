@@ -1,10 +1,14 @@
 from math import ceil
 from pathlib import Path
+import re
+from unicodedata import combining, normalize
 
 from PySide6.QtCore import QModelIndex, QObject, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -20,14 +24,30 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QTabBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from app.application.dtos.guest_dto import ImportSummaryDTO, WorkbookImportResultDTO
+from app.application.dtos.guest_dto import GuestRowDTO, ImportSummaryDTO, WorkbookImportResultDTO
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
 from app.presentation.desktop.widgets.guest_table_model import GuestTableModel
+
+
+DIALOG_NAME_WORDS = (
+    "nome",
+    "name",
+    "convidado",
+    "pessoa",
+    "cliente",
+    "participante",
+    "destinatario",
+)
+DIALOG_PHONE_WORDS = ("telefone", "phone", "celular", "whatsapp", "fone", "tel")
+DIALOG_EMAIL_WORDS = ("email", "e-mail", "mail")
+DIALOG_ADDRESS_WORDS = ("endereco", "address", "logradouro", "rua", "avenida", "av")
 
 
 class ImportWorker(QObject):
@@ -60,6 +80,7 @@ class MainWindow(QMainWindow):
         self._current_import_id: int | None = None
         self._current_sheet_selectable = False
         self._automatic_mode = False
+        self._duplicates_mode = False
         self._current_search = ""
         self._current_page = 0
         self._total_rows = 0
@@ -447,6 +468,13 @@ class MainWindow(QMainWindow):
                 self.workbook_tabs.count() - 1,
                 {"kind": "workbook", "workbook_id": workbook.id},
             )
+        duplicates_count = self._duplicates_count()
+        if workbooks and duplicates_count > 0:
+            self.workbook_tabs.addTab(f"Duplicados ({duplicates_count})")
+            self.workbook_tabs.setTabData(
+                self.workbook_tabs.count() - 1,
+                {"kind": "duplicates", "workbook_id": None},
+            )
         automatic_count = self._automatic_selected_count()
         if workbooks and automatic_count > 0:
             self.workbook_tabs.addTab(self._automatic_tab_text(automatic_count))
@@ -459,6 +487,7 @@ class MainWindow(QMainWindow):
         if not workbooks:
             self._current_workbook_id = None
             self._automatic_mode = False
+            self._duplicates_mode = False
             self._imports = []
             self._load_sheet_tabs()
             self._update_actions()
@@ -479,21 +508,30 @@ class MainWindow(QMainWindow):
         if index < 0:
             self._current_workbook_id = None
             self._automatic_mode = False
+            self._duplicates_mode = False
         elif tab_data and tab_data["kind"] == "automatic":
             self._current_workbook_id = None
             self._current_import_id = None
             self._current_sheet_selectable = True
             self._automatic_mode = True
+            self._duplicates_mode = False
+        elif tab_data and tab_data["kind"] == "duplicates":
+            self._current_workbook_id = None
+            self._current_import_id = None
+            self._current_sheet_selectable = True
+            self._automatic_mode = False
+            self._duplicates_mode = True
         else:
             self._current_workbook_id = int(tab_data["workbook_id"])
             self._automatic_mode = False
+            self._duplicates_mode = False
         self._current_search = ""
         self.search_input.clear()
         self._current_page = 0
         self._load_sheet_tabs()
 
     def _load_sheet_tabs(self) -> None:
-        if self._automatic_mode:
+        if self._automatic_mode or self._duplicates_mode:
             self.sheet_frame.setVisible(False)
             self.sheet_tabs.blockSignals(True)
             self._clear_tab_bar(self.sheet_tabs)
@@ -542,7 +580,7 @@ class MainWindow(QMainWindow):
         return -1
 
     def _show_filter_menu(self) -> None:
-        if self._automatic_mode or not self._imports:
+        if self._automatic_mode or self._duplicates_mode or not self._imports:
             return
 
         menu = QMenu(self)
@@ -571,6 +609,18 @@ class MainWindow(QMainWindow):
                 page=0,
                 page_size=50,
                 selected_only=True,
+            ).total_rows
+        except Exception:
+            return 0
+
+    def _duplicates_count(self) -> int:
+        try:
+            return self._view_model.load_guests(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                duplicates_only=True,
             ).total_rows
         except Exception:
             return 0
@@ -616,7 +666,7 @@ class MainWindow(QMainWindow):
         self.workbook_tabs.blockSignals(False)
 
     def _on_sheet_changed(self, index: int) -> None:
-        if self._automatic_mode:
+        if self._automatic_mode or self._duplicates_mode:
             self._current_import_id = None
             self._current_sheet_selectable = True
             self._load_table()
@@ -653,10 +703,17 @@ class MainWindow(QMainWindow):
             workbook_id = None
             import_id = None
             selected_only = True
+            duplicates_only = False
+        elif self._duplicates_mode:
+            workbook_id = None
+            import_id = None
+            selected_only = False
+            duplicates_only = True
         elif self._current_workbook_id is not None and self.sheet_tabs.count() > 0:
             workbook_id = self._current_workbook_id
             import_id = self._current_import_id
             selected_only = False
+            duplicates_only = False
         else:
             self._set_table_page([], tuple(), tuple(), 0, 0, 0)
             return
@@ -669,6 +726,7 @@ class MainWindow(QMainWindow):
                 page_size=self.page_size_input.value(),
                 search=self._current_search,
                 selected_only=selected_only,
+                duplicates_only=duplicates_only,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao carregar dados", str(exc))
@@ -706,20 +764,29 @@ class MainWindow(QMainWindow):
         )
         self.table.setModel(self._table_model)
         self.table.setColumnWidth(0, 110)
-        self.table.setColumnWidth(1, 70)
-        if self.table.model() is not None and self.table.model().columnCount() > 2:
-            self.table.setColumnWidth(2, 190)
+        self.table.setColumnWidth(1, 95)
+        self.table.setColumnWidth(2, 120)
+        self.table.setColumnWidth(3, 70)
+        if self.table.model() is not None and self.table.model().columnCount() > 4:
+            self.table.setColumnWidth(4, 190)
         self._update_page_label()
         self._update_actions()
 
     def _update_page_label(self) -> None:
         if self._total_rows == 0:
-            message = "Nenhum convidado selecionado" if self._automatic_mode else "Nenhum registro encontrado"
+            if self._automatic_mode:
+                message = "Nenhum convidado selecionado"
+            elif self._duplicates_mode:
+                message = "Nenhum duplicado encontrado"
+            else:
+                message = "Nenhum registro encontrado"
             self.page_label.setText(message)
             return
 
         total_pages = max(ceil(self._total_rows / max(self._page_size, 1)), 1)
         suffix = "na planilha automática" if self._automatic_mode else f"{self._selected_rows} selecionados"
+        if self._duplicates_mode:
+            suffix = "possíveis duplicados"
         self.page_label.setText(
             f"Página {self._current_page + 1} de {total_pages} | {self._total_rows} registros | {suffix}"
         )
@@ -730,11 +797,164 @@ class MainWindow(QMainWindow):
 
     def _on_row_selection_changed(self, guest_id: int, selected: bool) -> None:
         try:
-            self._view_model.set_guest_selected(guest_id, selected)
+            selected_guest_id = guest_id
+            if selected and not self._automatic_mode:
+                reviewed_guest_id = self._review_duplicate_selection(guest_id)
+                if reviewed_guest_id is None:
+                    self._load_table()
+                    return
+                selected_guest_id = reviewed_guest_id
+                if not self._confirm_automatic_conflicts(selected_guest_id):
+                    self._load_table()
+                    return
+
+            self._view_model.set_guest_selected(selected_guest_id, selected)
+            if selected and selected_guest_id != guest_id:
+                self.status_label.setText("Registro selecionado após revisão de duplicidade.")
             self._refresh_automatic_tab_label()
             self._load_table()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao selecionar", str(exc))
+
+    def _review_duplicate_selection(self, guest_id: int) -> int | None:
+        candidates = self._view_model.list_duplicate_candidates(guest_id)
+        if len(candidates) <= 1:
+            return guest_id
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Duplicidade encontrada")
+        dialog.resize(980, 420)
+        layout = QVBoxLayout(dialog)
+
+        message = QLabel(
+            "Encontrei duplicidade. Selecione o registro correto para enviar para a Planilha automática."
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        table = self._build_guest_review_table(candidates)
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Enviar selecionado")
+        if cancel_button is not None:
+            cancel_button.setText("Cancelar")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        table.itemDoubleClicked.connect(lambda _: dialog.accept())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        selected_ranges = table.selectedRanges()
+        if not selected_ranges:
+            return None
+        selected_row = selected_ranges[0].topRow()
+        item = table.item(selected_row, 0)
+        if item is None:
+            return None
+        return int(item.data(Qt.ItemDataRole.UserRole))
+
+    def _confirm_automatic_conflicts(self, guest_id: int) -> bool:
+        conflicts = self._view_model.list_automatic_conflicts(guest_id)
+        if not conflicts:
+            return True
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Conferir Planilha automática")
+        dialog.resize(980, 420)
+        layout = QVBoxLayout(dialog)
+
+        message = QLabel(
+            "Já tem dados parecidos com esses na Planilha automática. "
+            "Confira nome, e-mail, telefone e endereço antes de adicionar."
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        table = self._build_guest_review_table(conflicts)
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Adicionar mesmo assim")
+        if cancel_button is not None:
+            cancel_button.setText("Cancelar")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _build_guest_review_table(self, rows: list[GuestRowDTO]) -> QTableWidget:
+        table = QTableWidget(len(rows), 7)
+        table.setHorizontalHeaderLabels(
+            ["Código", "Duplicidade", "Lista", "Nome", "Telefone", "E-mail", "Endereço"]
+        )
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+
+        for row_index, row in enumerate(rows):
+            values = [
+                row.verification_code,
+                self._format_duplicate_label(row),
+                row.sheet_name,
+                self._guest_value_by_headers(row, DIALOG_NAME_WORDS),
+                self._guest_value_by_headers(row, DIALOG_PHONE_WORDS),
+                self._guest_email_value(row),
+                self._guest_value_by_headers(row, DIALOG_ADDRESS_WORDS),
+            ]
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column_index == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row.id)
+                item.setToolTip(str(value))
+                table.setItem(row_index, column_index, item)
+
+        if rows:
+            table.selectRow(0)
+        table.resizeColumnsToContents()
+        return table
+
+    def _format_duplicate_label(self, row: GuestRowDTO) -> str:
+        if row.duplicate_count <= 1:
+            return ""
+        return f"{row.duplicate_reason} ({row.duplicate_count})"
+
+    def _guest_value_by_headers(self, row: GuestRowDTO, header_words: tuple[str, ...]) -> str:
+        normalized_words = {self._normalize_dialog_text(word) for word in header_words}
+        for column_name, value in row.data.items():
+            normalized_column = self._normalize_dialog_text(column_name)
+            if any(word and word in normalized_column for word in normalized_words):
+                return str(value)
+        return ""
+
+    def _guest_email_value(self, row: GuestRowDTO) -> str:
+        value = self._guest_value_by_headers(row, DIALOG_EMAIL_WORDS)
+        if value:
+            return value
+        for candidate in row.data.values():
+            match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", str(candidate))
+            if match:
+                return match.group(0)
+        return ""
+
+    def _normalize_dialog_text(self, value: str) -> str:
+        normalized = normalize("NFD", str(value).casefold())
+        return "".join(character for character in normalized if not combining(character))
 
     def _on_cell_changed(self, guest_id: int, column_name: str, value: str) -> bool:
         try:
@@ -825,6 +1045,8 @@ class MainWindow(QMainWindow):
             return
         tab_data = self.workbook_tabs.tabData(index)
         if not tab_data:
+            return
+        if tab_data["kind"] == "duplicates":
             return
 
         menu = QMenu(self)
@@ -1007,15 +1229,21 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self) -> None:
         has_workbook = self._current_workbook_id is not None
-        has_workspace = has_workbook or self._automatic_mode
-        can_select = has_workbook and self._current_sheet_selectable and not self._automatic_mode and self._total_rows > 0
+        has_workspace = has_workbook or self._automatic_mode or self._duplicates_mode
+        can_select = (
+            has_workbook
+            and self._current_sheet_selectable
+            and not self._automatic_mode
+            and not self._duplicates_mode
+            and self._total_rows > 0
+        )
         can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
         has_next = self._total_rows > (self._current_page + 1) * max(self._page_size, 1)
 
         self.search_button.setEnabled(has_workspace)
         self.clear_search_button.setEnabled(has_workspace)
-        self.filter_button.setEnabled(has_workbook and not self._automatic_mode and bool(self._imports))
-        self.export_button.setEnabled(has_workspace)
+        self.filter_button.setEnabled(has_workbook and not self._automatic_mode and not self._duplicates_mode and bool(self._imports))
+        self.export_button.setEnabled(has_workbook or self._automatic_mode)
         self.select_page_button.setEnabled(can_select)
         self.clear_page_button.setEnabled(can_clear_page)
         self.select_all_button.setEnabled(can_select)

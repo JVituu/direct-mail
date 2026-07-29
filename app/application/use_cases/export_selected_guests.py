@@ -60,6 +60,7 @@ class ExportSelectedGuestsUseCase:
                 import_id=guest.import_id,
                 sheet_name=guest.sheet_name,
                 row_number=guest.row_number,
+                verification_code=guest.verification_code,
                 data={"Lista": guest.sheet_name, **guest.data},
                 selected=guest.selected,
             )

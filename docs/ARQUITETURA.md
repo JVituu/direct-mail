@@ -100,9 +100,13 @@ Essa camada deve ser usada com cuidado para não virar uma pasta genérica demai
 
 O SQLite será usado como banco local da aplicação. A interface gráfica não deve acessar o banco diretamente. Todo acesso ao banco deve passar por casos de uso e repositórios.
 
+No MVP, o banco local é criado em `data/mala_direta.sqlite3` e possui tabelas para importações e convidados importados.
+
 ## Planilhas
 
 A leitura de planilhas deve ficar isolada em `app/infrastructure/spreadsheet`. Assim, se no futuro a leitura mudar de pandas para openpyxl puro, a regra de negócio não será afetada.
+
+Para planilhas grandes, a leitura inicial do MVP usa `openpyxl` em modo `read_only`, importando os dados em lotes para o SQLite. A interface exibe os registros por paginação, evitando carregar todos os registros na tabela de uma vez.
 
 ## Testes
 

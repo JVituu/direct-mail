@@ -86,9 +86,6 @@ pip freeze > requirements.txt
 
 SQLite does not need to be installed separately, as it is already part of the standard Python library.
 
-<<<<<<< HEAD
-## Distribution
-=======
 ## Executar o MVP
 
 Com o ambiente virtual criado, rode:
@@ -100,16 +97,25 @@ ambiente_config\Scripts\python.exe -m app.main
 O MVP atual permite:
 
 1. Importar uma planilha `.xlsx`.
-2. Importar automaticamente as abas úteis do arquivo.
-3. Detectar tabelas que possuem título e observação antes do cabeçalho.
-4. Filtrar por lista/aba, como Amigos, Família, Jornalistas ou Políticos.
-5. Visualizar os registros com paginação.
-6. Buscar texto em qualquer coluna importada.
-7. Selecionar convidados por checkbox, por página ou por filtro.
-8. Visualizar a planilha automática de selecionados dentro do sistema.
-9. Exportar os convidados selecionados para um novo `.xlsx`.
+2. Manter cada arquivo importado dentro do sistema como uma aba superior.
+3. Renomear ou excluir uma planilha importada pelo botão direito na aba superior.
+4. Mostrar as abas internas do Excel, como Resumo, Amigos, Família, Jornalistas ou Políticos.
+5. Detectar tabelas que possuem título e observação antes do cabeçalho.
+6. Visualizar os registros com paginação.
+7. Buscar texto em qualquer coluna importada.
+8. Editar dados importados diretamente na tabela.
+9. Filtrar listas/abas pelo botão `Filtros`.
+10. Selecionar convidados pela coluna `Selecionado`, por página, por filtro ou pelo botão `Selecionar todos`.
+11. Visualizar a planilha automática de selecionados como uma guia superior própria.
+12. Exportar os convidados selecionados para um novo `.xlsx`.
 
 O banco local é criado automaticamente em `data/mala_direta.sqlite3`.
+
+Arquivos já importados ficam salvos no banco local. Para renomear ou remover um arquivo do sistema, clique com o botão direito na aba superior do arquivo e escolha `Renomear planilha` ou `Excluir planilha`.
+
+A guia superior `Planilha automática` aparece quando existir pelo menos um convidado selecionado. Ela é atualizada em tempo real e também pode ser renomeada ou excluída pelo botão direito. Excluir essa guia limpa a lista final de selecionados, sem remover as planilhas importadas.
+
+As células de dados podem ser editadas com duplo clique ou F2. A Planilha automática guarda uma cópia independente dos nomes selecionados, então alterações feitas nela não modificam a planilha principal. Na planilha principal, linhas selecionadas ficam destacadas em verde.
 
 ## Testes
 
@@ -120,7 +126,6 @@ ambiente_config\Scripts\python.exe -m unittest
 ```
 
 ## Distribuição
->>>>>>> 48f3ba1 (Update 1.0 do sistema)
 
 Planned methods for delivering the application to the user:
 

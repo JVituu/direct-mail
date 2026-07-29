@@ -5,10 +5,15 @@ from app.application.dtos.guest_dto import (
     ImportResultDTO,
     ImportSummaryDTO,
     WorkbookImportResultDTO,
+    WorkbookSummaryDTO,
 )
+from app.application.use_cases.delete_workbook import DeleteWorkbookUseCase
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
-from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase
+from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase, ListWorkbooksUseCase
+from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
+from app.application.use_cases.rename_workbook import RenameWorkbookUseCase
+from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
 from app.domain.repositories.guest_repository import GuestRepository
 from app.domain.repositories.selected_guests_exporter import SelectedGuestsExporter
@@ -29,9 +34,14 @@ class MainViewModel:
             guest_repository=guest_repository,
             spreadsheet_reader=spreadsheet_reader,
         )
+        self._list_workbooks = ListWorkbooksUseCase(guest_repository)
         self._list_imports = ListImportsUseCase(guest_repository)
         self._list_guests = ListGuestsUseCase(guest_repository)
+        self._update_guest_data = UpdateGuestDataUseCase(guest_repository)
         self._update_selection = UpdateGuestSelectionUseCase(guest_repository)
+        self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
+        self._rename_workbook = RenameWorkbookUseCase(guest_repository)
+        self._manage_automatic_sheet = ManageAutomaticSheetUseCase(guest_repository)
         self._export_selected = ExportSelectedGuestsUseCase(
             guest_repository=guest_repository,
             exporter=selected_guests_exporter,
@@ -67,12 +77,16 @@ class MainViewModel:
             progress_callback=progress_callback,
         )
 
-    def list_imports(self) -> list[ImportSummaryDTO]:
-        return self._list_imports.execute()
+    def list_workbooks(self) -> list[WorkbookSummaryDTO]:
+        return self._list_workbooks.execute()
+
+    def list_imports(self, workbook_id: int | None = None) -> list[ImportSummaryDTO]:
+        return self._list_imports.execute(workbook_id)
 
     def load_guests(
         self,
         import_id: int | None,
+        workbook_id: int | None,
         page: int,
         page_size: int,
         search: str = "",
@@ -80,6 +94,7 @@ class MainViewModel:
     ) -> GuestPageDTO:
         return self._list_guests.execute(
             import_id=import_id,
+            workbook_id=workbook_id,
             page=page,
             page_size=page_size,
             search=search,
@@ -89,22 +104,53 @@ class MainViewModel:
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         self._update_selection.set_guest_selected(guest_id, selected)
 
+    def update_guest_data(
+        self,
+        guest_id: int,
+        column_name: str,
+        value: object,
+        automatic: bool = False,
+    ) -> None:
+        self._update_guest_data.execute(guest_id, column_name, value, automatic=automatic)
+
     def set_page_selected(self, guest_ids: Sequence[int], selected: bool) -> int:
         return self._update_selection.set_page_selected(guest_ids, selected)
 
     def set_all_filtered_selected(
         self,
         import_id: int | None,
+        workbook_id: int | None,
         selected: bool,
         search: str = "",
     ) -> int:
         return self._update_selection.set_all_filtered_selected(
             import_id=import_id,
+            workbook_id=workbook_id,
             selected=selected,
             search=search,
         )
 
-    def export_selected(self, import_id: int | None, output_path: str) -> ImportResultDTO:
-        return self._export_selected.execute(import_id, output_path)
+    def delete_workbook(self, workbook_id: int) -> None:
+        self._delete_workbook.execute(workbook_id)
+
+    def rename_workbook(self, workbook_id: int, display_name: str) -> None:
+        self._rename_workbook.execute(workbook_id, display_name)
+
+    def automatic_sheet_name(self) -> str:
+        return self._manage_automatic_sheet.get_name()
+
+    def rename_automatic_sheet(self, display_name: str) -> None:
+        self._manage_automatic_sheet.rename(display_name)
+
+    def clear_automatic_sheet(self) -> int:
+        return self._manage_automatic_sheet.clear()
+
+    def export_selected(
+        self,
+        import_id: int | None,
+        output_path: str,
+        workbook_id: int | None = None,
+    ) -> ImportResultDTO:
+        return self._export_selected.execute(import_id, output_path, workbook_id)
 
 

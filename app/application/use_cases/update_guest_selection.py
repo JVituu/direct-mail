@@ -15,6 +15,7 @@ class UpdateGuestSelectionUseCase:
             return 0
         return self._guest_repository.set_guests_selected(
             import_id=None,
+            workbook_id=None,
             selected=selected,
             guest_ids=guest_ids,
         )
@@ -22,11 +23,13 @@ class UpdateGuestSelectionUseCase:
     def set_all_filtered_selected(
         self,
         import_id: int | None,
+        workbook_id: int | None,
         selected: bool,
         search: str = "",
     ) -> int:
         return self._guest_repository.set_guests_selected(
             import_id=import_id,
+            workbook_id=workbook_id,
             selected=selected,
             search=search,
         )

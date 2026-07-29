@@ -9,3 +9,4 @@ class GuestRecord:
     row_number: int
     data: dict[str, str]
     selected: bool = False
+    selectable: bool = True

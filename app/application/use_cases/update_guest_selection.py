@@ -14,14 +14,14 @@ class UpdateGuestSelectionUseCase:
         if not guest_ids:
             return 0
         return self._guest_repository.set_guests_selected(
-            import_id=0,
+            import_id=None,
             selected=selected,
             guest_ids=guest_ids,
         )
 
     def set_all_filtered_selected(
         self,
-        import_id: int,
+        import_id: int | None,
         selected: bool,
         search: str = "",
     ) -> int:

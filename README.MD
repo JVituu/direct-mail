@@ -100,11 +100,14 @@ ambiente_config\Scripts\python.exe -m app.main
 O MVP atual permite:
 
 1. Importar uma planilha `.xlsx`.
-2. Escolher a aba da planilha quando houver mais de uma.
-3. Visualizar os registros com paginação.
-4. Buscar texto em qualquer coluna importada.
-5. Selecionar convidados por checkbox, por página ou por filtro.
-6. Exportar os convidados selecionados para um novo `.xlsx`.
+2. Importar automaticamente as abas úteis do arquivo.
+3. Detectar tabelas que possuem título e observação antes do cabeçalho.
+4. Filtrar por lista/aba, como Amigos, Família, Jornalistas ou Políticos.
+5. Visualizar os registros com paginação.
+6. Buscar texto em qualquer coluna importada.
+7. Selecionar convidados por checkbox, por página ou por filtro.
+8. Visualizar a planilha automática de selecionados dentro do sistema.
+9. Exportar os convidados selecionados para um novo `.xlsx`.
 
 O banco local é criado automaticamente em `data/mala_direta.sqlite3`.
 

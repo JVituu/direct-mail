@@ -7,9 +7,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -18,38 +18,32 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from app.application.dtos.guest_dto import ImportResultDTO
+from app.application.dtos.guest_dto import WorkbookImportResultDTO
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
 from app.presentation.desktop.widgets.guest_table_model import GuestTableModel
 
 
 class ImportWorker(QObject):
-    progress = Signal(int)
+    progress = Signal(str, int)
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(
-        self,
-        view_model: MainViewModel,
-        file_path: str,
-        sheet_name: str,
-    ) -> None:
+    def __init__(self, view_model: MainViewModel, file_path: str) -> None:
         super().__init__()
         self._view_model = view_model
         self._file_path = file_path
-        self._sheet_name = sheet_name
 
     @Slot()
     def run(self) -> None:
         try:
-            result = self._view_model.import_spreadsheet(
+            result = self._view_model.import_workbook(
                 file_path=self._file_path,
-                sheet_name=self._sheet_name,
                 progress_callback=self.progress.emit,
             )
             self.finished.emit(result)
@@ -62,119 +56,345 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._view_model = view_model
         self._current_import_id: int | None = None
-        self._current_page = 0
         self._current_search = ""
-        self._table_model: GuestTableModel | None = None
+        self._source_page = 0
+        self._selected_page = 0
+        self._source_total_rows = 0
+        self._source_page_size = 0
+        self._selected_total_rows = 0
+        self._selected_page_size = 0
+        self._source_model: GuestTableModel | None = None
+        self._selected_model: GuestTableModel | None = None
         self._import_thread: QThread | None = None
         self._import_worker: ImportWorker | None = None
 
         self.setWindowTitle("Mala Direta")
-        self.resize(1200, 760)
+        self.resize(1280, 820)
         self._build_ui()
+        self._apply_styles()
         self._load_imports()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
+        root.setObjectName("AppRoot")
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(12)
 
-        top_bar = QHBoxLayout()
-        self.import_button = QPushButton("Importar XLSX")
+        layout.addWidget(self._build_header())
+        layout.addWidget(self._build_filters())
+        layout.addWidget(self._build_selection_actions())
+        layout.addWidget(self._build_tabs(), 1)
+        layout.addWidget(self._build_status_bar())
+
+        self.setCentralWidget(root)
+
+    def _build_header(self) -> QFrame:
+        header = QFrame()
+        header.setObjectName("Header")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(14)
+
+        title_box = QVBoxLayout()
+        title = QLabel("Mala Direta")
+        title.setObjectName("Title")
+        subtitle = QLabel("Importe abas do Excel, filtre listas e acompanhe a planilha automática de selecionados.")
+        subtitle.setObjectName("Subtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        layout.addLayout(title_box, 1)
+
+        self.import_button = QPushButton("Importar Excel")
+        self.import_button.setObjectName("PrimaryButton")
         self.import_button.clicked.connect(self._choose_file)
-        top_bar.addWidget(self.import_button)
+        layout.addWidget(self.import_button)
 
-        self.export_button = QPushButton("Exportar selecionados")
+        self.export_button = QPushButton("Exportar Excel")
+        self.export_button.setObjectName("SuccessButton")
         self.export_button.clicked.connect(self._export_selected)
-        top_bar.addWidget(self.export_button)
+        layout.addWidget(self.export_button)
 
-        self.import_combo = QComboBox()
-        self.import_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.import_combo.currentIndexChanged.connect(self._on_import_changed)
-        top_bar.addWidget(self.import_combo)
-        layout.addLayout(top_bar)
+        return header
 
-        filter_bar = QHBoxLayout()
+    def _build_filters(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Lista"))
+        self.category_combo = QComboBox()
+        self.category_combo.setMinimumWidth(240)
+        self.category_combo.currentIndexChanged.connect(self._on_category_changed)
+        layout.addWidget(self.category_combo)
+
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar em qualquer coluna")
+        self.search_input.setPlaceholderText("Buscar por nome, telefone, endereço, obra ou qualquer coluna")
         self.search_input.returnPressed.connect(self._apply_search)
-        filter_bar.addWidget(self.search_input)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.search_input, 1)
 
         self.search_button = QPushButton("Buscar")
         self.search_button.clicked.connect(self._apply_search)
-        filter_bar.addWidget(self.search_button)
+        layout.addWidget(self.search_button)
 
         self.clear_search_button = QPushButton("Limpar")
         self.clear_search_button.clicked.connect(self._clear_search)
-        filter_bar.addWidget(self.clear_search_button)
+        layout.addWidget(self.clear_search_button)
 
-        filter_bar.addWidget(QLabel("Linhas por página"))
+        layout.addWidget(QLabel("Linhas"))
         self.page_size_input = QSpinBox()
         self.page_size_input.setRange(50, 5000)
         self.page_size_input.setSingleStep(50)
         self.page_size_input.setValue(500)
         self.page_size_input.valueChanged.connect(self._change_page_size)
-        filter_bar.addWidget(self.page_size_input)
-        layout.addLayout(filter_bar)
+        layout.addWidget(self.page_size_input)
 
-        selection_bar = QHBoxLayout()
+        return frame
+
+    def _build_selection_actions(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
+
         self.select_page_button = QPushButton("Selecionar página")
         self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
-        selection_bar.addWidget(self.select_page_button)
+        layout.addWidget(self.select_page_button)
 
         self.clear_page_button = QPushButton("Limpar página")
         self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
-        selection_bar.addWidget(self.clear_page_button)
+        layout.addWidget(self.clear_page_button)
 
         self.select_all_button = QPushButton("Selecionar todos filtrados")
         self.select_all_button.clicked.connect(lambda: self._set_all_filtered_selection(True))
-        selection_bar.addWidget(self.select_all_button)
+        layout.addWidget(self.select_all_button)
 
         self.clear_all_button = QPushButton("Limpar todos filtrados")
         self.clear_all_button.clicked.connect(lambda: self._set_all_filtered_selection(False))
-        selection_bar.addWidget(self.clear_all_button)
+        layout.addWidget(self.clear_all_button)
 
-        selection_bar.addStretch()
-        layout.addLayout(selection_bar)
+        layout.addStretch()
+        self.summary_label = QLabel("Nenhuma planilha importada")
+        self.summary_label.setObjectName("Summary")
+        layout.addWidget(self.summary_label)
 
-        self.table = QTableView()
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setDefaultSectionSize(160)
-        self.table.verticalHeader().setDefaultSectionSize(26)
-        layout.addWidget(self.table)
+        return frame
+
+    def _build_tabs(self) -> QTabWidget:
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_source_tab(), "Planilhas importadas")
+        self.tabs.addTab(self._build_selected_tab(), "Planilha automática")
+        self.tabs.currentChanged.connect(lambda _: self._update_actions())
+        return self.tabs
+
+    def _build_source_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(8)
+
+        self.source_table = self._create_table()
+        layout.addWidget(self.source_table, 1)
 
         page_bar = QHBoxLayout()
-        self.first_page_button = QPushButton("Primeira")
-        self.first_page_button.clicked.connect(self._go_first_page)
-        page_bar.addWidget(self.first_page_button)
+        self.source_first_page_button = QPushButton("Primeira")
+        self.source_first_page_button.clicked.connect(self._go_source_first_page)
+        page_bar.addWidget(self.source_first_page_button)
 
-        self.previous_page_button = QPushButton("Anterior")
-        self.previous_page_button.clicked.connect(self._go_previous_page)
-        page_bar.addWidget(self.previous_page_button)
+        self.source_previous_page_button = QPushButton("Anterior")
+        self.source_previous_page_button.clicked.connect(self._go_source_previous_page)
+        page_bar.addWidget(self.source_previous_page_button)
 
-        self.next_page_button = QPushButton("Próxima")
-        self.next_page_button.clicked.connect(self._go_next_page)
-        page_bar.addWidget(self.next_page_button)
+        self.source_next_page_button = QPushButton("Próxima")
+        self.source_next_page_button.clicked.connect(self._go_source_next_page)
+        page_bar.addWidget(self.source_next_page_button)
 
-        self.last_page_button = QPushButton("Última")
-        self.last_page_button.clicked.connect(self._go_last_page)
-        page_bar.addWidget(self.last_page_button)
+        self.source_last_page_button = QPushButton("Última")
+        self.source_last_page_button.clicked.connect(self._go_source_last_page)
+        page_bar.addWidget(self.source_last_page_button)
 
-        self.page_label = QLabel("Nenhuma planilha importada")
-        page_bar.addWidget(self.page_label)
+        self.source_page_label = QLabel("Nenhuma planilha importada")
+        page_bar.addWidget(self.source_page_label)
         page_bar.addStretch()
+        layout.addLayout(page_bar)
+
+        return tab
+
+    def _build_selected_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(8)
+
+        hint = QLabel("Esta é a planilha criada automaticamente conforme você seleciona convidados.")
+        hint.setObjectName("Hint")
+        layout.addWidget(hint)
+
+        self.selected_table = self._create_table()
+        layout.addWidget(self.selected_table, 1)
+
+        page_bar = QHBoxLayout()
+        self.selected_first_page_button = QPushButton("Primeira")
+        self.selected_first_page_button.clicked.connect(self._go_selected_first_page)
+        page_bar.addWidget(self.selected_first_page_button)
+
+        self.selected_previous_page_button = QPushButton("Anterior")
+        self.selected_previous_page_button.clicked.connect(self._go_selected_previous_page)
+        page_bar.addWidget(self.selected_previous_page_button)
+
+        self.selected_next_page_button = QPushButton("Próxima")
+        self.selected_next_page_button.clicked.connect(self._go_selected_next_page)
+        page_bar.addWidget(self.selected_next_page_button)
+
+        self.selected_last_page_button = QPushButton("Última")
+        self.selected_last_page_button.clicked.connect(self._go_selected_last_page)
+        page_bar.addWidget(self.selected_last_page_button)
+
+        self.selected_page_label = QLabel("Nenhum convidado selecionado")
+        page_bar.addWidget(self.selected_page_label)
+        page_bar.addStretch()
+        layout.addLayout(page_bar)
+
+        return tab
+
+    def _build_status_bar(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("StatusBar")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.progress_bar.setMaximumWidth(180)
-        page_bar.addWidget(self.progress_bar)
+        self.progress_bar.setMaximumWidth(200)
+        layout.addWidget(self.progress_bar)
 
-        self.status_label = QLabel("")
-        page_bar.addWidget(self.status_label)
-        layout.addLayout(page_bar)
+        self.status_label = QLabel("Pronto")
+        layout.addWidget(self.status_label)
+        layout.addStretch()
 
-        self.setCentralWidget(root)
+        return frame
+
+    def _create_table(self) -> QTableView:
+        table = QTableView()
+        table.setAlternatingRowColors(True)
+        table.setSortingEnabled(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setDefaultSectionSize(170)
+        table.verticalHeader().setDefaultSectionSize(28)
+        return table
+
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget#AppRoot {
+                background: #f5f7fb;
+                color: #172033;
+                font-size: 13px;
+            }
+            QFrame#Header {
+                background: #ffffff;
+                border: 1px solid #dde4ef;
+                border-radius: 8px;
+            }
+            QLabel#Title {
+                color: #0f2f5f;
+                font-size: 24px;
+                font-weight: 700;
+            }
+            QLabel#Subtitle, QLabel#Hint {
+                color: #607089;
+            }
+            QLabel#Summary {
+                color: #0f2f5f;
+                font-weight: 600;
+            }
+            QFrame#Panel {
+                background: #ffffff;
+                border: 1px solid #dde4ef;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: #eef3f9;
+                border: 1px solid #cfd9e8;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #172033;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #e3ecf7;
+            }
+            QPushButton:disabled {
+                color: #98a5b8;
+                background: #f1f3f6;
+                border-color: #e1e6ee;
+            }
+            QPushButton#PrimaryButton {
+                background: #1f5eff;
+                border-color: #1f5eff;
+                color: #ffffff;
+                padding: 10px 18px;
+            }
+            QPushButton#PrimaryButton:hover {
+                background: #174ed6;
+            }
+            QPushButton#SuccessButton {
+                background: #16835f;
+                border-color: #16835f;
+                color: #ffffff;
+                padding: 10px 18px;
+            }
+            QPushButton#SuccessButton:hover {
+                background: #126c50;
+            }
+            QLineEdit, QComboBox, QSpinBox {
+                background: #ffffff;
+                border: 1px solid #cfd9e8;
+                border-radius: 6px;
+                padding: 7px 9px;
+            }
+            QTableView {
+                background: #ffffff;
+                alternate-background-color: #f1f6fd;
+                border: 1px solid #dde4ef;
+                gridline-color: #dde4ef;
+                selection-background-color: #cfe0ff;
+                selection-color: #172033;
+            }
+            QHeaderView::section {
+                background: #245783;
+                color: #ffffff;
+                border: 0;
+                border-right: 1px solid #4779a4;
+                padding: 7px;
+                font-weight: 700;
+            }
+            QTabWidget::pane {
+                border: 0;
+            }
+            QTabBar::tab {
+                background: #e9eff7;
+                color: #33445f;
+                border: 1px solid #cfd9e8;
+                border-bottom: 0;
+                padding: 9px 16px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #0f2f5f;
+            }
+            """
+        )
 
     def _choose_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -183,43 +403,17 @@ class MainWindow(QMainWindow):
             str(Path.home()),
             "Planilhas Excel (*.xlsx)",
         )
-        if not file_path:
-            return
+        if file_path:
+            self._start_import(file_path)
 
-        try:
-            sheets = self._view_model.list_sheets(file_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Erro ao abrir planilha", str(exc))
-            return
-
-        if not sheets:
-            QMessageBox.warning(self, "Planilha vazia", "A planilha não possui abas.")
-            return
-
-        sheet_name = sheets[0]
-        if len(sheets) > 1:
-            selected_sheet, accepted = QInputDialog.getItem(
-                self,
-                "Selecionar aba",
-                "Aba da planilha:",
-                sheets,
-                0,
-                False,
-            )
-            if not accepted:
-                return
-            sheet_name = selected_sheet
-
-        self._start_import(file_path, sheet_name)
-
-    def _start_import(self, file_path: str, sheet_name: str) -> None:
+    def _start_import(self, file_path: str) -> None:
         self._set_busy(True)
-        self.status_label.setText("Importando 0 linhas...")
+        self.status_label.setText("Importando workbook...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
         thread = QThread(self)
-        worker = ImportWorker(self._view_model, file_path, sheet_name)
+        worker = ImportWorker(self._view_model, file_path)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -236,21 +430,29 @@ class MainWindow(QMainWindow):
         self._import_worker = worker
         thread.start()
 
-    @Slot(int)
-    def _on_import_progress(self, imported_rows: int) -> None:
-        self.status_label.setText(f"Importando {imported_rows} linhas...")
+    @Slot(str, int)
+    def _on_import_progress(self, sheet_name: str, imported_rows: int) -> None:
+        self.status_label.setText(f"Importando {sheet_name}: {imported_rows} linhas...")
 
     @Slot(object)
-    def _on_import_finished(self, result: ImportResultDTO) -> None:
+    def _on_import_finished(self, result: WorkbookImportResultDTO) -> None:
         self._set_busy(False)
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 100)
         self.status_label.setText(f"{result.total_rows} linhas importadas.")
-        self._load_imports(preferred_import_id=result.import_id)
+        self._load_imports(preferred_import_id=None)
+
+        skipped = ""
+        if result.skipped_sheets:
+            skipped = "\n\nAbas ignoradas sem tabela de contatos: " + ", ".join(result.skipped_sheets)
         QMessageBox.information(
             self,
             "Importação concluída",
-            f"{result.total_rows} linhas importadas da aba '{result.sheet_name}'.",
+            (
+                f"{len(result.imported_sheets)} listas importadas de '{result.file_name}'.\n"
+                f"{result.total_rows} registros disponíveis no sistema."
+                f"{skipped}"
+            ),
         )
 
     @Slot(str)
@@ -267,67 +469,62 @@ class MainWindow(QMainWindow):
 
     def _load_imports(self, preferred_import_id: int | None = None) -> None:
         imports = self._view_model.list_imports()
-        self.import_combo.blockSignals(True)
-        self.import_combo.clear()
+        self.category_combo.blockSignals(True)
+        self.category_combo.clear()
+        self.category_combo.addItem("Todas as listas", None)
 
         for imported_file in imports:
-            label = (
-                f"{imported_file.id} - {imported_file.file_name} | "
-                f"{imported_file.sheet_name} | {imported_file.total_rows} linhas"
-            )
-            self.import_combo.addItem(label, imported_file.id)
-
-        self.import_combo.blockSignals(False)
-
-        if not imports:
-            self._current_import_id = None
-            self._set_table_page([], tuple(), 0, 0, 0)
-            self._update_actions()
-            return
+            label = f"{imported_file.sheet_name} ({imported_file.total_rows})"
+            self.category_combo.addItem(label, imported_file.id)
 
         target_index = 0
         if preferred_import_id is not None:
-            for index in range(self.import_combo.count()):
-                if self.import_combo.itemData(index) == preferred_import_id:
+            for index in range(self.category_combo.count()):
+                if self.category_combo.itemData(index) == preferred_import_id:
                     target_index = index
                     break
 
-        self.import_combo.setCurrentIndex(target_index)
-        self._current_import_id = int(self.import_combo.currentData())
-        self._current_page = 0
-        self._load_current_page()
-        self._update_actions()
+        self.category_combo.setCurrentIndex(target_index)
+        self.category_combo.blockSignals(False)
+        self._current_import_id = self.category_combo.currentData()
+        self._source_page = 0
+        self._selected_page = 0
+        self._load_tables()
 
-    def _on_import_changed(self) -> None:
-        data = self.import_combo.currentData()
-        self._current_import_id = int(data) if data is not None else None
-        self._current_page = 0
-        self._load_current_page()
+    def _on_category_changed(self) -> None:
+        self._current_import_id = self.category_combo.currentData()
+        self._source_page = 0
+        self._selected_page = 0
+        self._load_tables()
 
     def _apply_search(self) -> None:
         self._current_search = self.search_input.text().strip()
-        self._current_page = 0
-        self._load_current_page()
+        self._source_page = 0
+        self._selected_page = 0
+        self._load_tables()
 
     def _clear_search(self) -> None:
         self.search_input.clear()
         self._current_search = ""
-        self._current_page = 0
-        self._load_current_page()
+        self._source_page = 0
+        self._selected_page = 0
+        self._load_tables()
 
     def _change_page_size(self) -> None:
-        self._current_page = 0
-        self._load_current_page()
+        self._source_page = 0
+        self._selected_page = 0
+        self._load_tables()
 
-    def _load_current_page(self) -> None:
-        if self._current_import_id is None:
-            self._set_table_page([], tuple(), 0, 0, 0)
-            return
+    def _load_tables(self) -> None:
+        self._load_source_page()
+        self._load_selected_page()
+        self._update_actions()
 
+    def _load_source_page(self) -> None:
         try:
             page = self._view_model.load_guests(
                 import_id=self._current_import_id,
-                page=self._current_page,
+                page=self._source_page,
                 page_size=self.page_size_input.value(),
                 search=self._current_search,
             )
@@ -335,70 +532,100 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro ao carregar dados", str(exc))
             return
 
-        max_page_index = max(ceil(page.total_rows / page.page_size) - 1, 0)
-        if self._current_page > max_page_index:
-            self._current_page = max_page_index
-            self._load_current_page()
+        self._source_total_rows = page.total_rows
+        self._source_page_size = page.page_size
+        self._source_page = self._normalize_page(self._source_page, page.total_rows, page.page_size)
+        self._source_model = GuestTableModel(page.rows, page.columns, self._on_source_selection_changed)
+        self.source_table.setModel(self._source_model)
+        self._configure_table_widths(self.source_table)
+        self._update_source_label(page.total_rows, page.selected_rows, page.page_size)
+
+    def _load_selected_page(self) -> None:
+        try:
+            page = self._view_model.load_guests(
+                import_id=self._current_import_id,
+                page=self._selected_page,
+                page_size=self.page_size_input.value(),
+                search=self._current_search,
+                selected_only=True,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao carregar selecionados", str(exc))
             return
 
-        self._set_table_page(
-            rows=page.rows,
-            columns=page.columns,
-            total_rows=page.total_rows,
-            selected_rows=page.selected_rows,
-            page_size=page.page_size,
+        self._selected_total_rows = page.total_rows
+        self._selected_page_size = page.page_size
+        self._selected_page = self._normalize_page(self._selected_page, page.total_rows, page.page_size)
+        self._selected_model = GuestTableModel(page.rows, page.columns, self._on_selected_selection_changed)
+        self.selected_table.setModel(self._selected_model)
+        self._configure_table_widths(self.selected_table)
+        self._update_selected_label(page.total_rows, page.page_size)
+        self.summary_label.setText(
+            f"{self._source_total_rows} registros no filtro | {self._selected_total_rows} na planilha automática"
         )
 
-    def _set_table_page(
-        self,
-        rows: list[object],
-        columns: tuple[str, ...],
-        total_rows: int,
-        selected_rows: int,
-        page_size: int,
-    ) -> None:
-        self._table_model = GuestTableModel(rows, columns, self._on_row_selection_changed)
-        self.table.setModel(self._table_model)
-        self.table.setColumnWidth(0, 105)
-        self.table.setColumnWidth(1, 70)
+    def _configure_table_widths(self, table: QTableView) -> None:
+        table.setColumnWidth(0, 110)
+        table.setColumnWidth(1, 70)
+        if table.model() is not None and table.model().columnCount() > 2:
+            table.setColumnWidth(2, 150)
 
+    def _normalize_page(self, page: int, total_rows: int, page_size: int) -> int:
+        max_page_index = max(ceil(total_rows / max(page_size, 1)) - 1, 0)
+        return min(page, max_page_index)
+
+    def _update_source_label(self, total_rows: int, selected_rows: int, page_size: int) -> None:
         if total_rows == 0:
-            self.page_label.setText("Nenhum registro encontrado")
-        else:
-            total_pages = max(ceil(total_rows / max(page_size, 1)), 1)
-            self.page_label.setText(
-            f"Página {self._current_page + 1} de {total_pages} | "
-                f"{total_rows} registros | {selected_rows} selecionados"
-            )
-        self._update_actions(total_rows=total_rows, page_size=page_size)
+            self.source_page_label.setText("Nenhum registro encontrado")
+            return
+        total_pages = max(ceil(total_rows / max(page_size, 1)), 1)
+        self.source_page_label.setText(
+            f"Página {self._source_page + 1} de {total_pages} | "
+            f"{total_rows} registros | {selected_rows} selecionados no filtro"
+        )
 
-    def _on_row_selection_changed(self, guest_id: int, selected: bool) -> None:
+    def _update_selected_label(self, total_rows: int, page_size: int) -> None:
+        if total_rows == 0:
+            self.selected_page_label.setText("Nenhum convidado selecionado")
+            return
+        total_pages = max(ceil(total_rows / max(page_size, 1)), 1)
+        self.selected_page_label.setText(
+            f"Página {self._selected_page + 1} de {total_pages} | "
+            f"{total_rows} convidados na planilha automática"
+        )
+
+    def _on_source_selection_changed(self, guest_id: int, selected: bool) -> None:
+        self._set_single_guest_selected(guest_id, selected)
+
+    def _on_selected_selection_changed(self, guest_id: int, selected: bool) -> None:
+        self._set_single_guest_selected(guest_id, selected)
+
+    def _set_single_guest_selected(self, guest_id: int, selected: bool) -> None:
         try:
             self._view_model.set_guest_selected(guest_id, selected)
+            self._load_tables()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao selecionar", str(exc))
 
     def _set_page_selection(self, selected: bool) -> None:
-        if self._table_model is None:
+        if self._source_model is None:
             return
-        guest_ids = self._table_model.guest_ids()
+        guest_ids = self._source_model.guest_ids()
         if not guest_ids:
             return
         try:
             self._view_model.set_page_selected(guest_ids, selected)
-            self._load_current_page()
+            self._load_tables()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao atualizar seleção", str(exc))
 
     def _set_all_filtered_selection(self, selected: bool) -> None:
-        if self._current_import_id is None:
-            return
-
         action = "selecionar" if selected else "limpar"
+        label = self.category_combo.currentText() or "o filtro atual"
         answer = QMessageBox.question(
             self,
             "Confirmar seleção",
-            f"Deseja {action} todos os registros do filtro atual?",
+            f"Deseja {action} todos os registros de '{label}' usando a busca atual?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -410,19 +637,23 @@ class MainWindow(QMainWindow):
                 search=self._current_search,
             )
             self.status_label.setText(f"{updated_rows} registros atualizados.")
-            self._load_current_page()
+            self._load_tables()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao atualizar seleção", str(exc))
 
     def _export_selected(self) -> None:
-        if self._current_import_id is None:
-            QMessageBox.warning(self, "Nenhuma planilha", "Importe uma planilha antes de exportar.")
+        if self._selected_total_rows == 0:
+            QMessageBox.warning(
+                self,
+                "Nenhum selecionado",
+                "Selecione pelo menos um convidado antes de exportar.",
+            )
             return
 
         output_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Salvar lista selecionada",
-            str(Path.home() / "convidados_selecionados.xlsx"),
+            "Salvar planilha automática",
+            str(Path.home() / "mala_direta_selecionados.xlsx"),
             "Planilhas Excel (*.xlsx)",
         )
         if not output_path:
@@ -439,58 +670,93 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao exportar", str(exc))
 
-    def _go_first_page(self) -> None:
-        self._current_page = 0
-        self._load_current_page()
+    def _go_source_first_page(self) -> None:
+        self._source_page = 0
+        self._load_source_page()
+        self._update_actions()
 
-    def _go_previous_page(self) -> None:
-        self._current_page = max(self._current_page - 1, 0)
-        self._load_current_page()
+    def _go_source_previous_page(self) -> None:
+        self._source_page = max(self._source_page - 1, 0)
+        self._load_source_page()
+        self._update_actions()
 
-    def _go_next_page(self) -> None:
-        self._current_page += 1
-        self._load_current_page()
+    def _go_source_next_page(self) -> None:
+        self._source_page += 1
+        self._load_source_page()
+        self._update_actions()
 
-    def _go_last_page(self) -> None:
-        if self._current_import_id is None:
-            return
-        page = self._view_model.load_guests(
-            import_id=self._current_import_id,
-            page=0,
-            page_size=self.page_size_input.value(),
-            search=self._current_search,
-        )
-        self._current_page = max(ceil(page.total_rows / page.page_size) - 1, 0)
-        self._load_current_page()
+    def _go_source_last_page(self) -> None:
+        self._source_page = max(ceil(self._source_total_rows / max(self._source_page_size, 1)) - 1, 0)
+        self._load_source_page()
+        self._update_actions()
+
+    def _go_selected_first_page(self) -> None:
+        self._selected_page = 0
+        self._load_selected_page()
+        self._update_actions()
+
+    def _go_selected_previous_page(self) -> None:
+        self._selected_page = max(self._selected_page - 1, 0)
+        self._load_selected_page()
+        self._update_actions()
+
+    def _go_selected_next_page(self) -> None:
+        self._selected_page += 1
+        self._load_selected_page()
+        self._update_actions()
+
+    def _go_selected_last_page(self) -> None:
+        self._selected_page = max(ceil(self._selected_total_rows / max(self._selected_page_size, 1)) - 1, 0)
+        self._load_selected_page()
+        self._update_actions()
 
     def _set_busy(self, busy: bool) -> None:
-        self.import_button.setEnabled(not busy)
-        self.export_button.setEnabled(not busy)
-        self.import_combo.setEnabled(not busy)
-        self.search_input.setEnabled(not busy)
-        self.search_button.setEnabled(not busy)
-        self.clear_search_button.setEnabled(not busy)
-        self.select_page_button.setEnabled(not busy)
-        self.clear_page_button.setEnabled(not busy)
-        self.select_all_button.setEnabled(not busy)
-        self.clear_all_button.setEnabled(not busy)
-        self.page_size_input.setEnabled(not busy)
+        widgets = (
+            self.import_button,
+            self.export_button,
+            self.category_combo,
+            self.search_input,
+            self.search_button,
+            self.clear_search_button,
+            self.select_page_button,
+            self.clear_page_button,
+            self.select_all_button,
+            self.clear_all_button,
+            self.page_size_input,
+        )
+        for widget in widgets:
+            widget.setEnabled(not busy)
+
         if busy:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         else:
             QApplication.restoreOverrideCursor()
 
-    def _update_actions(self, total_rows: int = 0, page_size: int = 0) -> None:
-        has_import = self._current_import_id is not None
-        has_rows = total_rows > 0
-        self.export_button.setEnabled(has_import)
-        self.search_button.setEnabled(has_import)
-        self.clear_search_button.setEnabled(has_import)
+    def _update_actions(self) -> None:
+        has_rows = self._source_total_rows > 0
+        has_selected = self._selected_total_rows > 0
+        self.export_button.setEnabled(has_selected)
+        self.search_button.setEnabled(self.category_combo.count() > 1)
+        self.clear_search_button.setEnabled(self.category_combo.count() > 1)
         self.select_page_button.setEnabled(has_rows)
         self.clear_page_button.setEnabled(has_rows)
         self.select_all_button.setEnabled(has_rows)
         self.clear_all_button.setEnabled(has_rows)
-        self.first_page_button.setEnabled(has_import and self._current_page > 0)
-        self.previous_page_button.setEnabled(has_import and self._current_page > 0)
-        self.next_page_button.setEnabled(has_import and total_rows > (self._current_page + 1) * page_size)
-        self.last_page_button.setEnabled(has_import and total_rows > (self._current_page + 1) * page_size)
+
+        self.source_first_page_button.setEnabled(self._source_page > 0)
+        self.source_previous_page_button.setEnabled(self._source_page > 0)
+        self.source_next_page_button.setEnabled(
+            self._source_total_rows > (self._source_page + 1) * max(self._source_page_size, 1)
+        )
+        self.source_last_page_button.setEnabled(
+            self._source_total_rows > (self._source_page + 1) * max(self._source_page_size, 1)
+        )
+
+        self.selected_first_page_button.setEnabled(self._selected_page > 0)
+        self.selected_previous_page_button.setEnabled(self._selected_page > 0)
+        self.selected_next_page_button.setEnabled(
+            self._selected_total_rows > (self._selected_page + 1) * max(self._selected_page_size, 1)
+        )
+        self.selected_last_page_button.setEnabled(
+            self._selected_total_rows > (self._selected_page + 1) * max(self._selected_page_size, 1)
+        )

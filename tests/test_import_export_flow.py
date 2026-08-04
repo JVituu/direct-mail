@@ -108,6 +108,125 @@ class ImportExportFlowTest(unittest.TestCase):
             self.assertEqual(duplicates_page.total_rows, 0)
             self.assertLessEqual(len(candidates), 1)
 
+    def test_cleans_contact_values_imported_in_wrong_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            spreadsheet_path = temp_path / "contatos_baguncados.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Contatos"
+            worksheet.append(["NOME", "Telefone", "Celular", "E-mail", "CEP", "ENDERECO", "EDIFICIO", "ESTADO"])
+            worksheet.append([
+                "Ana",
+                "ana.extra@hotmail.com",
+                "3333-4444",
+                "ana@email.com",
+                "81999998888",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Bruno",
+                "99999-8888",
+                "bruno@example.com",
+                "",
+                "50000-000",
+                "Rua Alpha, 100",
+                "EDF TESTE",
+                "PE",
+            ])
+            worksheet.append([
+                "Carla",
+                "Rua Beta, 200",
+                "EDF CENTRAL",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Diego",
+                "32681279",
+                "999998888",
+                "",
+                "51030000",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Elaine",
+                "",
+                "",
+                "",
+                "51020-210\n33270845\n99119444",
+                "",
+                "",
+                "",
+            ])
+            workbook.save(spreadsheet_path)
+            workbook.close()
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_result = ImportSpreadsheetUseCase(
+                guest_repository=repository,
+                spreadsheet_reader=OpenpyxlSpreadsheetReader(),
+            ).execute_workbook(str(spreadsheet_path))
+
+            page = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+
+            ana = page.rows[0].data
+            bruno = page.rows[1].data
+            carla = page.rows[2].data
+            diego = page.rows[3].data
+            elaine = page.rows[4].data
+
+            self.assertEqual(ana["Telefone"], "3333-4444")
+            self.assertEqual(ana["Celular"], "81999998888")
+            self.assertEqual(ana["E-mail"], "ana@email.com\nana.extra@hotmail.com")
+            self.assertEqual(ana["CEP"], "")
+
+            self.assertEqual(bruno["Telefone"], "")
+            self.assertEqual(bruno["Celular"], "99999-8888")
+            self.assertEqual(bruno["E-mail"], "bruno@example.com")
+            self.assertEqual(bruno["CEP"], "50000-000")
+
+            self.assertEqual(carla["Telefone"], "")
+            self.assertEqual(carla["Celular"], "")
+            self.assertEqual(carla["ENDERECO"], "Rua Beta, 200")
+            self.assertEqual(carla["EDIFICIO"], "EDF CENTRAL")
+
+            self.assertEqual(diego["Telefone"], "32681279")
+            self.assertEqual(diego["Celular"], "999998888")
+            self.assertEqual(diego["CEP"], "51030000")
+
+            self.assertEqual(elaine["Telefone"], "33270845")
+            self.assertEqual(elaine["Celular"], "99119444")
+            self.assertEqual(elaine["CEP"], "51020-210")
+
+            UpdateGuestSelectionUseCase(repository).set_guest_selected(page.rows[0].id, True)
+            automatic_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            automatic_ana = automatic_page.rows[0].data
+            self.assertEqual(automatic_ana["Telefone"], "3333-4444")
+            self.assertEqual(automatic_ana["Celular"], "81999998888")
+            self.assertEqual(automatic_ana["E-mail"], "ana@email.com\nana.extra@hotmail.com")
+
     def test_imports_simple_single_column_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

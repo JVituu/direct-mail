@@ -4,6 +4,7 @@ from app.application.dtos.guest_dto import (
     ImportSummaryDTO,
     WorkbookSummaryDTO,
 )
+from app.application.services.contact_data_cleaner import ContactDataCleaner
 from app.domain.entities.imported_workbook import ImportedWorkbook
 from app.domain.entities.spreadsheet_import import SpreadsheetImport
 from app.domain.repositories.guest_repository import GuestRepository
@@ -88,6 +89,7 @@ class ListGuestsUseCase:
             selected_rows = self._guest_repository.count_selected_guests(import_id, workbook_id, search)
         offset = safe_page * safe_page_size
         columns = self._guest_repository.get_columns(import_id, workbook_id)
+        cleaner = ContactDataCleaner(columns)
         include_list_column = import_id is None or selected_only
         display_columns = (("Lista", *columns) if include_list_column else columns)
         editable_columns = columns
@@ -119,7 +121,11 @@ class ListGuestsUseCase:
                 sheet_name=row.sheet_name,
                 row_number=row.row_number,
                 verification_code=row.verification_code,
-                data=self._to_display_data(row.sheet_name, row.data, include_list_column),
+                data=self._to_display_data(
+                    row.sheet_name,
+                    cleaner.clean_values(row.data),
+                    include_list_column,
+                ),
                 selected=row.selected,
                 selectable=row.selectable,
                 duplicate_reason=row.duplicate_reason,

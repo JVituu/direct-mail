@@ -8,6 +8,7 @@ from app.application.use_cases.export_selected_guests import ExportSelectedGuest
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase
 from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
+from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
 from app.infrastructure.repositories.sqlite_guest_repository import SqliteGuestRepository
@@ -16,6 +17,216 @@ from app.infrastructure.spreadsheet.openpyxl_reader import OpenpyxlSpreadsheetRe
 
 
 class ImportExportFlowTest(unittest.TestCase):
+    def test_detects_duplicates_across_workbooks_by_normalized_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            first_spreadsheet = temp_path / "lista_a.xlsx"
+            second_spreadsheet = temp_path / "lista_b.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            self._create_single_contact_workbook(first_spreadsheet, "Amigos", "José da Silva", "(00) 90000-0000")
+            self._create_single_contact_workbook(second_spreadsheet, "Políticos", "Jose Silva", "(00) 91111-1111")
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            reader = OpenpyxlSpreadsheetReader()
+            import_use_case = ImportSpreadsheetUseCase(repository, reader)
+
+            first_import = import_use_case.execute_workbook(str(first_spreadsheet))
+            second_import = import_use_case.execute_workbook(str(second_spreadsheet))
+
+            duplicates_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                duplicates_only=True,
+            )
+
+            self.assertEqual(duplicates_page.total_rows, 2)
+            self.assertEqual({row.duplicate_reason for row in duplicates_page.rows}, {"Nome"})
+            self.assertEqual({row.duplicate_count for row in duplicates_page.rows}, {2})
+
+            first_page = ListGuestsUseCase(repository).execute(
+                import_id=first_import.imported_sheets[0].import_id,
+                workbook_id=first_import.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            second_page = ListGuestsUseCase(repository).execute(
+                import_id=second_import.imported_sheets[0].import_id,
+                workbook_id=second_import.workbook_id,
+                page=0,
+                page_size=50,
+            )
+
+            self.assertEqual(first_page.rows[0].duplicate_reason, "Nome")
+            self.assertEqual(first_page.rows[0].duplicate_count, 2)
+            self.assertEqual(second_page.rows[0].duplicate_reason, "Nome")
+            self.assertEqual(second_page.rows[0].duplicate_count, 2)
+
+            review_use_case = ReviewDuplicateSelectionUseCase(repository)
+            candidates = review_use_case.list_duplicate_candidates(first_page.rows[0].id)
+            self.assertEqual({candidate.id for candidate in candidates}, {first_page.rows[0].id, second_page.rows[0].id})
+
+            UpdateGuestSelectionUseCase(repository).set_guest_selected(first_page.rows[0].id, True)
+            automatic_conflicts = review_use_case.list_automatic_conflicts(second_page.rows[0].id)
+            self.assertEqual([conflict.id for conflict in automatic_conflicts], [first_page.rows[0].id])
+
+    def test_ignores_weak_single_token_duplicate_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            first_spreadsheet = temp_path / "lista_a.xlsx"
+            second_spreadsheet = temp_path / "lista_b.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            self._create_single_contact_workbook(first_spreadsheet, "Lista A", "FILHA", "(00) 90000-0000")
+            self._create_single_contact_workbook(second_spreadsheet, "Lista B", "FILHA", "(00) 91111-1111")
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_use_case = ImportSpreadsheetUseCase(repository, OpenpyxlSpreadsheetReader())
+
+            first_import = import_use_case.execute_workbook(str(first_spreadsheet))
+            import_use_case.execute_workbook(str(second_spreadsheet))
+
+            duplicates_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                duplicates_only=True,
+            )
+            first_page = ListGuestsUseCase(repository).execute(
+                import_id=first_import.imported_sheets[0].import_id,
+                workbook_id=first_import.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            candidates = ReviewDuplicateSelectionUseCase(repository).list_duplicate_candidates(first_page.rows[0].id)
+
+            self.assertEqual(duplicates_page.total_rows, 0)
+            self.assertLessEqual(len(candidates), 1)
+
+    def test_cleans_contact_values_imported_in_wrong_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            spreadsheet_path = temp_path / "contatos_baguncados.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Contatos"
+            worksheet.append(["NOME", "Telefone", "Celular", "E-mail", "CEP", "ENDERECO", "EDIFICIO", "ESTADO"])
+            worksheet.append([
+                "Ana",
+                "ana.extra@hotmail.com",
+                "3333-4444",
+                "ana@email.com",
+                "81999998888",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Bruno",
+                "99999-8888",
+                "bruno@example.com",
+                "",
+                "50000-000",
+                "Rua Alpha, 100",
+                "EDF TESTE",
+                "PE",
+            ])
+            worksheet.append([
+                "Carla",
+                "Rua Beta, 200",
+                "EDF CENTRAL",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Diego",
+                "32681279",
+                "999998888",
+                "",
+                "51030000",
+                "",
+                "",
+                "",
+            ])
+            worksheet.append([
+                "Elaine",
+                "",
+                "",
+                "",
+                "51020-210\n33270845\n99119444",
+                "",
+                "",
+                "",
+            ])
+            workbook.save(spreadsheet_path)
+            workbook.close()
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_result = ImportSpreadsheetUseCase(
+                guest_repository=repository,
+                spreadsheet_reader=OpenpyxlSpreadsheetReader(),
+            ).execute_workbook(str(spreadsheet_path))
+
+            page = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+
+            ana = page.rows[0].data
+            bruno = page.rows[1].data
+            carla = page.rows[2].data
+            diego = page.rows[3].data
+            elaine = page.rows[4].data
+
+            self.assertEqual(ana["Telefone"], "3333-4444")
+            self.assertEqual(ana["Celular"], "81999998888")
+            self.assertEqual(ana["E-mail"], "ana@email.com\nana.extra@hotmail.com")
+            self.assertEqual(ana["CEP"], "")
+
+            self.assertEqual(bruno["Telefone"], "")
+            self.assertEqual(bruno["Celular"], "99999-8888")
+            self.assertEqual(bruno["E-mail"], "bruno@example.com")
+            self.assertEqual(bruno["CEP"], "50000-000")
+
+            self.assertEqual(carla["Telefone"], "")
+            self.assertEqual(carla["Celular"], "")
+            self.assertEqual(carla["ENDERECO"], "Rua Beta, 200")
+            self.assertEqual(carla["EDIFICIO"], "EDF CENTRAL")
+
+            self.assertEqual(diego["Telefone"], "32681279")
+            self.assertEqual(diego["Celular"], "999998888")
+            self.assertEqual(diego["CEP"], "51030000")
+
+            self.assertEqual(elaine["Telefone"], "33270845")
+            self.assertEqual(elaine["Celular"], "99119444")
+            self.assertEqual(elaine["CEP"], "51020-210")
+
+            UpdateGuestSelectionUseCase(repository).set_guest_selected(page.rows[0].id, True)
+            automatic_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            automatic_ana = automatic_page.rows[0].data
+            self.assertEqual(automatic_ana["Telefone"], "3333-4444")
+            self.assertEqual(automatic_ana["Celular"], "81999998888")
+            self.assertEqual(automatic_ana["E-mail"], "ana@email.com\nana.extra@hotmail.com")
+
     def test_imports_simple_single_column_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -51,6 +262,9 @@ class ImportExportFlowTest(unittest.TestCase):
             )
 
             self.assertEqual(page.columns, ("Convidado",))
+            self.assertEqual(len(page.rows[0].verification_code), 8)
+            self.assertTrue(page.rows[0].verification_code.isdigit())
+            self.assertNotEqual(page.rows[0].verification_code, page.rows[1].verification_code)
             self.assertEqual(page.rows[0].data["Convidado"], "Jose")
 
     def test_import_workbook_select_and_export_automatic_sheet(self) -> None:
@@ -109,7 +323,19 @@ class ImportExportFlowTest(unittest.TestCase):
             self.assertEqual(amigos_page.total_rows, 2)
             self.assertEqual(amigos_page.columns, ("Nome", "Endereço", "Telefone", "Obra / Universo"))
             self.assertEqual(amigos_page.rows[0].data["Nome"], "Chandler Bing")
+            self.assertEqual(len(amigos_page.rows[0].verification_code), 8)
+            self.assertNotEqual(amigos_page.rows[0].verification_code, amigos_page.rows[1].verification_code)
             self.assertTrue(amigos_page.rows[0].selectable)
+
+            code_search_page = ListGuestsUseCase(repository).execute(
+                import_id=amigos_sheet.import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+                search=amigos_page.rows[0].verification_code,
+            )
+            self.assertEqual(code_search_page.total_rows, 1)
+            self.assertEqual(code_search_page.rows[0].data["Nome"], "Chandler Bing")
 
             selection_use_case = UpdateGuestSelectionUseCase(repository)
             updated_rows = selection_use_case.set_all_filtered_selected(
@@ -177,6 +403,7 @@ class ImportExportFlowTest(unittest.TestCase):
             self.assertEqual(selected_page.editable_columns, ("Nome", "Endereço", "Telefone", "Obra / Universo"))
             self.assertEqual(selected_page.rows[0].data["Telefone"], "(00) 90000-0001")
             self.assertEqual(selected_page.rows[2].data["Nome"], "Ada Lovelace")
+            self.assertEqual(selected_page.rows[0].verification_code, amigos_page.rows[0].verification_code)
 
             update_data_use_case.execute(
                 guest_id=selected_page.rows[0].id,
@@ -260,6 +487,15 @@ class ImportExportFlowTest(unittest.TestCase):
             ],
         )
 
+        workbook.save(path)
+        workbook.close()
+
+    def _create_single_contact_workbook(self, path: Path, sheet_name: str, name: str, phone: str) -> None:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = sheet_name
+        worksheet.append(["Nome", "Telefone"])
+        worksheet.append([name, phone])
         workbook.save(path)
         workbook.close()
 

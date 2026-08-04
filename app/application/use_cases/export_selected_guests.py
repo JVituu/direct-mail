@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from app.application.dtos.guest_dto import ImportResultDTO
+from app.application.services.contact_data_cleaner import ContactDataCleaner
 from app.domain.entities.guest_record import GuestRecord
 from app.domain.repositories.guest_repository import GuestRepository
 from app.domain.repositories.selected_guests_exporter import SelectedGuestsExporter
@@ -37,6 +38,7 @@ class ExportSelectedGuestsUseCase:
         columns = self._guest_repository.get_columns(import_id, workbook_id)
         export_columns = columns if import_id is not None else ("Lista", *columns)
         guests = self._guest_repository.iter_automatic_guests(import_id, workbook_id)
+        guests = self._clean_guests(guests, columns)
 
         if import_id is None:
             guests = self._with_list_column(guests)
@@ -60,6 +62,24 @@ class ExportSelectedGuestsUseCase:
                 import_id=guest.import_id,
                 sheet_name=guest.sheet_name,
                 row_number=guest.row_number,
+                verification_code=guest.verification_code,
                 data={"Lista": guest.sheet_name, **guest.data},
+                selected=guest.selected,
+            )
+
+    def _clean_guests(
+        self,
+        guests: Iterable[GuestRecord],
+        columns: tuple[str, ...],
+    ) -> Iterable[GuestRecord]:
+        cleaner = ContactDataCleaner(columns)
+        for guest in guests:
+            yield GuestRecord(
+                id=guest.id,
+                import_id=guest.import_id,
+                sheet_name=guest.sheet_name,
+                row_number=guest.row_number,
+                verification_code=guest.verification_code,
+                data=cleaner.clean_values(guest.data),
                 selected=guest.selected,
             )

@@ -7,6 +7,9 @@ class GuestRecord:
     import_id: int
     sheet_name: str
     row_number: int
+    verification_code: str
     data: dict[str, str]
     selected: bool = False
     selectable: bool = True
+    duplicate_reason: str = ""
+    duplicate_count: int = 0

@@ -2,6 +2,7 @@ from collections.abc import Callable, Sequence
 
 from app.application.dtos.guest_dto import (
     GuestPageDTO,
+    GuestRowDTO,
     ImportResultDTO,
     ImportSummaryDTO,
     WorkbookImportResultDTO,
@@ -13,6 +14,7 @@ from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCas
 from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase, ListWorkbooksUseCase
 from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
 from app.application.use_cases.rename_workbook import RenameWorkbookUseCase
+from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
 from app.domain.repositories.guest_repository import GuestRepository
@@ -42,6 +44,7 @@ class MainViewModel:
         self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
         self._rename_workbook = RenameWorkbookUseCase(guest_repository)
         self._manage_automatic_sheet = ManageAutomaticSheetUseCase(guest_repository)
+        self._review_duplicate_selection = ReviewDuplicateSelectionUseCase(guest_repository)
         self._export_selected = ExportSelectedGuestsUseCase(
             guest_repository=guest_repository,
             exporter=selected_guests_exporter,
@@ -91,6 +94,7 @@ class MainViewModel:
         page_size: int,
         search: str = "",
         selected_only: bool = False,
+        duplicates_only: bool = False,
     ) -> GuestPageDTO:
         return self._list_guests.execute(
             import_id=import_id,
@@ -99,10 +103,17 @@ class MainViewModel:
             page_size=page_size,
             search=search,
             selected_only=selected_only,
+            duplicates_only=duplicates_only,
         )
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         self._update_selection.set_guest_selected(guest_id, selected)
+
+    def list_duplicate_candidates(self, guest_id: int) -> list[GuestRowDTO]:
+        return self._review_duplicate_selection.list_duplicate_candidates(guest_id)
+
+    def list_automatic_conflicts(self, guest_id: int) -> list[GuestRowDTO]:
+        return self._review_duplicate_selection.list_automatic_conflicts(guest_id)
 
     def update_guest_data(
         self,

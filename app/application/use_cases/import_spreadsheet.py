@@ -3,6 +3,7 @@ from pathlib import Path
 from unicodedata import combining, normalize
 
 from app.application.dtos.guest_dto import ImportResultDTO, WorkbookImportResultDTO
+from app.application.services.contact_data_cleaner import ContactDataCleaner
 from app.domain.repositories.guest_repository import GuestRepository
 from app.domain.repositories.spreadsheet_reader import SpreadsheetReader
 from app.domain.value_objects.spreadsheet_row import SpreadsheetRow
@@ -146,10 +147,11 @@ class ImportSpreadsheetUseCase:
 
         total_rows = 0
         batch: list[SpreadsheetRow] = []
+        cleaner = ContactDataCleaner(columns) if is_selectable else None
 
         try:
             for row in self._spreadsheet_reader.iter_rows(str(path), selected_sheet):
-                batch.append(row)
+                batch.append(cleaner.clean_row(row) if cleaner is not None else row)
                 if len(batch) >= self._batch_size:
                     self._guest_repository.insert_guests(import_id, batch)
                     total_rows += len(batch)

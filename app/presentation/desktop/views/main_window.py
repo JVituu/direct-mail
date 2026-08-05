@@ -514,7 +514,7 @@ class MainWindow(QMainWindow):
         duplicates_count = self._duplicates_count()
         self._update_duplicates_button(duplicates_count)
         automatic_count = self._automatic_selected_count()
-        if workbooks and automatic_count > 0:
+        if automatic_count > 0:
             self.workbook_tabs.addTab(self._automatic_tab_text(automatic_count))
             self.workbook_tabs.setTabData(
                 self.workbook_tabs.count() - 1,
@@ -522,7 +522,7 @@ class MainWindow(QMainWindow):
             )
         self.workbook_tabs.blockSignals(False)
 
-        if not workbooks:
+        if not workbooks and automatic_count <= 0:
             self._current_workbook_id = None
             self._automatic_mode = False
             self._duplicates_mode = False
@@ -532,6 +532,8 @@ class MainWindow(QMainWindow):
             return
 
         target_index = 0
+        if not workbooks and automatic_count > 0:
+            target_index = self._automatic_tab_index()
         if preferred_workbook_id is not None:
             for index in range(self.workbook_tabs.count()):
                 tab_data = self.workbook_tabs.tabData(index)

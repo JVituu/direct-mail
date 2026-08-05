@@ -273,6 +273,7 @@ class ImportExportFlowTest(unittest.TestCase):
             spreadsheet_path = temp_path / "mala_direta.xlsx"
             database_path = temp_path / "mala_direta.sqlite3"
             export_path = temp_path / "selecionados.xlsx"
+            preserved_export_path = temp_path / "selecionados_preservados.xlsx"
 
             self._create_workbook(spreadsheet_path)
 
@@ -442,22 +443,42 @@ class ImportExportFlowTest(unittest.TestCase):
             self.assertTrue(export_path.exists())
             self._assert_exported_content(export_path)
 
+            repository.delete_workbook(import_result.workbook_id)
+            self.assertEqual(repository.list_workbooks(), [])
+            self.assertEqual(repository.list_imports(import_result.workbook_id), [])
+
+            preserved_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            self.assertEqual(preserved_page.total_rows, 3)
+            self.assertEqual(preserved_page.columns, selected_page.columns)
+            self.assertEqual(preserved_page.rows[0].data["Nome"], "Chandler Export")
+
+            preserved_export_result = ExportSelectedGuestsUseCase(
+                guest_repository=repository,
+                exporter=exporter,
+            ).execute(None, str(preserved_export_path))
+
+            self.assertEqual(preserved_export_result.total_rows, 3)
+            self.assertTrue(preserved_export_path.exists())
+            self._assert_exported_content(preserved_export_path)
+
             cleared_rows = automatic_sheet_use_case.clear()
             self.assertEqual(cleared_rows, 3)
             self.assertEqual(automatic_sheet_use_case.get_name(), "Planilha automática")
 
             selected_page_after_clear = ListGuestsUseCase(repository).execute(
                 import_id=None,
-                workbook_id=import_result.workbook_id,
+                workbook_id=None,
                 page=0,
                 page_size=50,
                 selected_only=True,
             )
             self.assertEqual(selected_page_after_clear.total_rows, 0)
-
-            repository.delete_workbook(import_result.workbook_id)
-            self.assertEqual(repository.list_workbooks(), [])
-            self.assertEqual(repository.list_imports(import_result.workbook_id), [])
 
     def _create_workbook(self, path: Path) -> None:
         workbook = Workbook()

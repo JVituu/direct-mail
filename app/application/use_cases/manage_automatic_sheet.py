@@ -18,16 +18,6 @@ class ManageAutomaticSheetUseCase:
         self._guest_repository.rename_automatic_sheet(clean_name)
 
     def clear(self) -> int:
-        selected_rows = self._guest_repository.count_automatic_guests(
-            import_id=None,
-            workbook_id=None,
-            search="",
-        )
-        self._guest_repository.set_guests_selected(
-            import_id=None,
-            workbook_id=None,
-            selected=False,
-            search="",
-        )
+        selected_rows = self._guest_repository.clear_automatic_guests()
         self._guest_repository.rename_automatic_sheet(DEFAULT_AUTOMATIC_SHEET_NAME)
         return selected_rows

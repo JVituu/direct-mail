@@ -87,6 +87,9 @@ class GuestRepository(Protocol):
     ) -> int:
         raise NotImplementedError
 
+    def clear_automatic_guests(self) -> int:
+        raise NotImplementedError
+
     def get_columns(
         self,
         import_id: int | None = None,

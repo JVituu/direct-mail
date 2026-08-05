@@ -101,14 +101,14 @@ class SqliteGuestRepository:
 
                 CREATE TABLE IF NOT EXISTS automatic_guests (
                     source_guest_id INTEGER PRIMARY KEY,
-                    source_import_id INTEGER NOT NULL,
+                    source_import_id INTEGER,
+                    source_workbook_id INTEGER,
                     sheet_name TEXT NOT NULL,
                     row_number INTEGER NOT NULL,
                     verification_code TEXT NOT NULL,
+                    columns_json TEXT NOT NULL DEFAULT '[]',
                     data_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (source_guest_id) REFERENCES guests(id) ON DELETE CASCADE,
-                    FOREIGN KEY (source_import_id) REFERENCES imports(id) ON DELETE CASCADE
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS guest_identities (
@@ -142,6 +142,9 @@ class SqliteGuestRepository:
 
                 CREATE INDEX IF NOT EXISTS idx_automatic_guests_import_id
                     ON automatic_guests(source_import_id);
+
+                CREATE INDEX IF NOT EXISTS idx_automatic_guests_workbook_id
+                    ON automatic_guests(source_workbook_id);
 
                 CREATE INDEX IF NOT EXISTS idx_automatic_guests_verification_code
                     ON automatic_guests(verification_code);
@@ -407,7 +410,6 @@ class SqliteGuestRepository:
         query = """
             SELECT COUNT(*)
             FROM automatic_guests
-            JOIN imports ON imports.id = automatic_guests.source_import_id
             WHERE 1 = 1
         """
         params: list[object] = []
@@ -423,6 +425,12 @@ class SqliteGuestRepository:
 
         with connect(self._database_path) as connection:
             return int(connection.execute(query, params).fetchone()[0])
+
+    def clear_automatic_guests(self) -> int:
+        with connect(self._database_path) as connection:
+            cursor = connection.execute("DELETE FROM automatic_guests")
+            connection.execute("UPDATE guests SET selected = 0 WHERE selected = 1")
+            return int(cursor.rowcount)
 
     def get_columns(
         self,
@@ -444,6 +452,47 @@ class SqliteGuestRepository:
                 if column not in seen:
                     columns.append(column)
                     seen.add(column)
+        for column in self._automatic_columns(import_id, workbook_id):
+            if column not in seen:
+                columns.append(column)
+                seen.add(column)
+        return tuple(columns)
+
+    def _automatic_columns(
+        self,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+    ) -> tuple[str, ...]:
+        query = """
+            SELECT columns_json, data_json
+            FROM automatic_guests
+            WHERE 1 = 1
+        """
+        params: list[object] = []
+        query, params = self._apply_automatic_guest_filters(query, params, import_id, workbook_id)
+
+        columns: list[str] = []
+        seen: set[str] = set()
+        with connect(self._database_path) as connection:
+            rows = connection.execute(query, params).fetchall()
+
+        for row in rows:
+            try:
+                row_columns = json.loads(row["columns_json"])
+            except (TypeError, json.JSONDecodeError):
+                row_columns = []
+            if not row_columns:
+                try:
+                    row_columns = list(json.loads(row["data_json"]).keys())
+                except (TypeError, json.JSONDecodeError):
+                    row_columns = []
+
+            for column in row_columns:
+                column_name = str(column)
+                if column_name not in seen:
+                    columns.append(column_name)
+                    seen.add(column_name)
+
         return tuple(columns)
 
     def list_guests(
@@ -506,7 +555,6 @@ class SqliteGuestRepository:
                 automatic_guests.data_json,
                 1 AS selected
             FROM automatic_guests
-            JOIN imports ON imports.id = automatic_guests.source_import_id
             WHERE 1 = 1
         """
         params: list[object] = []
@@ -519,7 +567,7 @@ class SqliteGuestRepository:
         )
         if duplicates_only:
             query = self._apply_duplicate_filter(query, "automatic_guests.source_guest_id")
-        query += " ORDER BY automatic_guests.source_import_id, automatic_guests.row_number LIMIT ? OFFSET ?"
+        query += " ORDER BY automatic_guests.created_at, automatic_guests.source_import_id, automatic_guests.row_number LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with connect(self._database_path) as connection:
@@ -689,6 +737,9 @@ class SqliteGuestRepository:
         selected_value = 1 if selected else 0
 
         with connect(self._database_path) as connection:
+            if guest_ids is None and not selected and import_id is None and workbook_id is None:
+                return self._clear_automatic_filtered(connection, search)
+
             if guest_ids is not None:
                 connection.executemany(
                     """
@@ -774,12 +825,11 @@ class SqliteGuestRepository:
                 automatic_guests.data_json,
                 1 AS selected
             FROM automatic_guests
-            JOIN imports ON imports.id = automatic_guests.source_import_id
             WHERE 1 = 1
         """
         params: list[object] = []
         query, params = self._apply_automatic_guest_filters(query, params, import_id, workbook_id)
-        query += " ORDER BY automatic_guests.source_import_id, automatic_guests.row_number"
+        query += " ORDER BY automatic_guests.created_at, automatic_guests.source_import_id, automatic_guests.row_number"
 
         with connect(self._database_path) as connection:
             rows = connection.execute(query, params)
@@ -792,18 +842,22 @@ class SqliteGuestRepository:
             INSERT OR IGNORE INTO automatic_guests (
                 source_guest_id,
                 source_import_id,
+                source_workbook_id,
                 sheet_name,
                 row_number,
                 verification_code,
+                columns_json,
                 data_json,
                 created_at
             )
             SELECT
                 guests.id,
                 guests.import_id,
+                imports.workbook_id,
                 imports.sheet_name,
                 guests.row_number,
                 guests.verification_code,
+                imports.columns_json,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -835,18 +889,22 @@ class SqliteGuestRepository:
             INSERT OR IGNORE INTO automatic_guests (
                 source_guest_id,
                 source_import_id,
+                source_workbook_id,
                 sheet_name,
                 row_number,
                 verification_code,
+                columns_json,
                 data_json,
                 created_at
             )
             SELECT
                 guests.id,
                 guests.import_id,
+                imports.workbook_id,
                 imports.sheet_name,
                 guests.row_number,
                 guests.verification_code,
+                imports.columns_json,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -876,18 +934,22 @@ class SqliteGuestRepository:
             INSERT OR IGNORE INTO automatic_guests (
                 source_guest_id,
                 source_import_id,
+                source_workbook_id,
                 sheet_name,
                 row_number,
                 verification_code,
+                columns_json,
                 data_json,
                 created_at
             )
             SELECT
                 guests.id,
                 guests.import_id,
+                imports.workbook_id,
                 imports.sheet_name,
                 guests.row_number,
                 guests.verification_code,
+                imports.columns_json,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -897,6 +959,36 @@ class SqliteGuestRepository:
             """,
             list(params),
         )
+
+    def _clear_automatic_filtered(self, connection: object, search: str = "") -> int:
+        query = """
+            SELECT automatic_guests.source_guest_id
+            FROM automatic_guests
+            WHERE 1 = 1
+        """
+        params: list[object] = []
+        query, params = self._apply_automatic_guest_filters(
+            query,
+            params,
+            import_id=None,
+            workbook_id=None,
+            search=search,
+        )
+        rows = connection.execute(query, params).fetchall()
+        guest_ids = [int(row["source_guest_id"]) for row in rows]
+        if not guest_ids:
+            return 0
+
+        placeholders = ", ".join("?" for _ in guest_ids)
+        connection.execute(
+            f"DELETE FROM automatic_guests WHERE source_guest_id IN ({placeholders})",
+            guest_ids,
+        )
+        connection.execute(
+            f"UPDATE guests SET selected = 0 WHERE id IN ({placeholders})",
+            guest_ids,
+        )
+        return len(guest_ids)
 
     def _apply_guest_filters(
         self,
@@ -930,7 +1022,7 @@ class SqliteGuestRepository:
             query += " AND automatic_guests.source_import_id = ?"
             params.append(import_id)
         if workbook_id is not None:
-            query += " AND imports.workbook_id = ?"
+            query += " AND automatic_guests.source_workbook_id = ?"
             params.append(workbook_id)
         if search.strip():
             query += """
@@ -1115,9 +1207,105 @@ class SqliteGuestRepository:
             connection.execute("UPDATE workbooks SET display_name = file_name WHERE display_name IS NULL")
         self._migrate_existing_imports(connection)
         self._migrate_guest_verification_codes(connection)
+        self._migrate_automatic_guests_storage(connection)
         self._upsert_guest_identities(connection)
         self._migrate_existing_automatic_guests(connection)
         self._migrate_automatic_verification_codes(connection)
+
+    def _migrate_automatic_guests_storage(self, connection: object) -> None:
+        columns = self._table_columns(connection, "automatic_guests")
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(automatic_guests)").fetchall()
+        required_columns = {"source_workbook_id", "columns_json"}
+        if required_columns.issubset(columns) and not foreign_keys:
+            return
+
+        source_import_expr = (
+            "automatic_guests.source_import_id"
+            if "source_import_id" in columns
+            else "guests.import_id"
+        )
+        source_workbook_expr = (
+            "automatic_guests.source_workbook_id"
+            if "source_workbook_id" in columns
+            else "imports.workbook_id"
+        )
+        sheet_name_expr = (
+            "automatic_guests.sheet_name"
+            if "sheet_name" in columns
+            else "imports.sheet_name"
+        )
+        row_number_expr = (
+            "automatic_guests.row_number"
+            if "row_number" in columns
+            else "guests.row_number"
+        )
+        verification_code_expr = (
+            "automatic_guests.verification_code"
+            if "verification_code" in columns
+            else "guests.verification_code"
+        )
+        columns_json_expr = (
+            "automatic_guests.columns_json"
+            if "columns_json" in columns
+            else "imports.columns_json"
+        )
+        data_json_expr = (
+            "automatic_guests.data_json"
+            if "data_json" in columns
+            else "guests.data_json"
+        )
+        created_at_expr = (
+            "automatic_guests.created_at"
+            if "created_at" in columns
+            else "datetime('now')"
+        )
+
+        connection.execute("DROP TABLE IF EXISTS automatic_guests_legacy")
+        connection.execute("ALTER TABLE automatic_guests RENAME TO automatic_guests_legacy")
+        connection.execute(
+            """
+            CREATE TABLE automatic_guests (
+                source_guest_id INTEGER PRIMARY KEY,
+                source_import_id INTEGER,
+                source_workbook_id INTEGER,
+                sheet_name TEXT NOT NULL,
+                row_number INTEGER NOT NULL,
+                verification_code TEXT NOT NULL,
+                columns_json TEXT NOT NULL DEFAULT '[]',
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT OR IGNORE INTO automatic_guests (
+                source_guest_id,
+                source_import_id,
+                source_workbook_id,
+                sheet_name,
+                row_number,
+                verification_code,
+                columns_json,
+                data_json,
+                created_at
+            )
+            SELECT
+                automatic_guests.source_guest_id,
+                COALESCE({source_import_expr}, guests.import_id),
+                COALESCE({source_workbook_expr}, imports.workbook_id),
+                COALESCE({sheet_name_expr}, imports.sheet_name, ''),
+                COALESCE({row_number_expr}, guests.row_number, 0),
+                COALESCE(NULLIF({verification_code_expr}, ''), guests.verification_code, ''),
+                COALESCE(NULLIF({columns_json_expr}, ''), imports.columns_json, '[]'),
+                COALESCE({data_json_expr}, guests.data_json, '{{}}'),
+                COALESCE({created_at_expr}, datetime('now'))
+            FROM automatic_guests_legacy AS automatic_guests
+            LEFT JOIN guests ON guests.id = automatic_guests.source_guest_id
+            LEFT JOIN imports ON imports.id = COALESCE({source_import_expr}, guests.import_id)
+            """
+        )
+        connection.execute("DROP TABLE automatic_guests_legacy")
 
     def _migrate_existing_imports(self, connection: object) -> None:
         rows = connection.execute(
@@ -1175,18 +1363,22 @@ class SqliteGuestRepository:
             INSERT OR IGNORE INTO automatic_guests (
                 source_guest_id,
                 source_import_id,
+                source_workbook_id,
                 sheet_name,
                 row_number,
                 verification_code,
+                columns_json,
                 data_json,
                 created_at
             )
             SELECT
                 guests.id,
                 guests.import_id,
+                imports.workbook_id,
                 imports.sheet_name,
                 guests.row_number,
                 guests.verification_code,
+                imports.columns_json,
                 guests.data_json,
                 datetime('now')
             FROM guests
@@ -1357,6 +1549,11 @@ class SqliteGuestRepository:
             """
             SELECT verification_code
             FROM guests
+            WHERE verification_code IS NOT NULL
+            AND TRIM(verification_code) != ''
+            UNION
+            SELECT verification_code
+            FROM automatic_guests
             WHERE verification_code IS NOT NULL
             AND TRIM(verification_code) != ''
             """

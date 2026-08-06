@@ -3,7 +3,8 @@ from pathlib import Path
 import re
 from unicodedata import combining, normalize
 
-from PySide6.QtCore import QModelIndex, QObject, QThread, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QPointF, QRect, QThread, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -21,10 +22,13 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QComboBox,
     QPushButton,
     QProgressBar,
     QSizePolicy,
-    QSpinBox,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -76,6 +80,7 @@ DIALOG_CEP_PATTERN = re.compile(r"(?<!\d)\d{5}-?\d{3}(?!\d)")
 DIALOG_PHONE_PATTERN = re.compile(
     r"(?<!\d)(?:\+?55\s*)?(?:\(?\d{2}\)?[\s.-]*)?(?:9[\s.-]*)?\d{4}[\s.-]?\d{4}(?!\d)"
 )
+DEFAULT_PAGE_SIZE = 500
 
 
 class ImportWorker(QObject):
@@ -100,6 +105,99 @@ class ImportWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class SendCornerButton(QPushButton):
+    def paintEvent(self, event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        background = QColor("#eef3f9") if self.underMouse() and self.isEnabled() else QColor("#ffffff")
+        if not self.isEnabled():
+            background = QColor("#f8fafc")
+        painter.setPen(QPen(QColor("#dde4ef")))
+        painter.setBrush(QBrush(background))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+        icon_color = QColor("#176bd7") if self.isEnabled() else QColor("#a8b2c1")
+        width = max(self.width(), 1)
+        height = max(self.height(), 1)
+        points = QPolygonF(
+            [
+                QPointF(width * 0.30, height * 0.20),
+                QPointF(width * 0.82, height * 0.50),
+                QPointF(width * 0.30, height * 0.80),
+                QPointF(width * 0.39, height * 0.57),
+                QPointF(width * 0.57, height * 0.50),
+                QPointF(width * 0.39, height * 0.43),
+            ]
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(icon_color))
+        painter.drawPolygon(points)
+
+
+class CircleCheckDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        check_state = index.data(Qt.ItemDataRole.CheckStateRole)
+        if check_state is None:
+            super().paint(painter, option, index)
+            return
+
+        view_option = QStyleOptionViewItem(option)
+        self.initStyleOption(view_option, index)
+        view_option.text = ""
+        view_option.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+
+        style = view_option.widget.style() if view_option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, view_option, painter, view_option.widget)
+
+        box_size = 16
+        box_x = option.rect.x() + (option.rect.width() - box_size) // 2
+        box_y = option.rect.y() + (option.rect.height() - box_size) // 2
+        box_rect = QRect(box_x, box_y, box_size, box_size)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#8b98a8")))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawRoundedRect(box_rect, 4, 4)
+
+        if check_state == Qt.CheckState.Checked:
+            dot_size = 8
+            dot_x = box_x + (box_size - dot_size) // 2
+            dot_y = box_y + (box_size - dot_size) // 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor("#111827")))
+            painter.drawEllipse(dot_x, dot_y, dot_size, dot_size)
+        painter.restore()
+
+    def editorEvent(
+        self,
+        event: object,
+        model: object,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        if not index.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+            return False
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            current_state = index.data(Qt.ItemDataRole.CheckStateRole)
+            next_state = (
+                Qt.CheckState.Unchecked
+                if current_state == Qt.CheckState.Checked
+                else Qt.CheckState.Checked
+            )
+            return bool(model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole))
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Select):
+            current_state = index.data(Qt.ItemDataRole.CheckStateRole)
+            next_state = (
+                Qt.CheckState.Unchecked
+                if current_state == Qt.CheckState.Checked
+                else Qt.CheckState.Checked
+            )
+            return bool(model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole))
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, view_model: MainViewModel) -> None:
         super().__init__()
@@ -113,10 +211,11 @@ class MainWindow(QMainWindow):
         self._current_page = 0
         self._total_rows = 0
         self._selected_rows = 0
-        self._page_size = 0
+        self._page_size = DEFAULT_PAGE_SIZE
         self._imports: list[ImportSummaryDTO] = []
         self._available_columns: tuple[str, ...] = tuple()
         self._visible_columns_by_context: dict[str, set[str]] = {}
+        self._marked_guest_ids: set[int] = set()
         self._table_model: GuestTableModel | None = None
         self._import_thread: QThread | None = None
         self._import_worker: ImportWorker | None = None
@@ -231,14 +330,6 @@ class MainWindow(QMainWindow):
         self.clear_search_button.clicked.connect(self._clear_search)
         layout.addWidget(self.clear_search_button)
 
-        layout.addWidget(QLabel("Linhas"))
-        self.page_size_input = QSpinBox()
-        self.page_size_input.setRange(50, 5000)
-        self.page_size_input.setSingleStep(50)
-        self.page_size_input.setValue(500)
-        self.page_size_input.valueChanged.connect(self._change_page_size)
-        layout.addWidget(self.page_size_input)
-
         self.select_page_button = QPushButton("Selecionar página")
         self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
         layout.addWidget(self.select_page_button)
@@ -246,14 +337,6 @@ class MainWindow(QMainWindow):
         self.clear_page_button = QPushButton("Limpar página")
         self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
         layout.addWidget(self.clear_page_button)
-
-        self.select_all_button = QPushButton("Selecionar todos")
-        self.select_all_button.clicked.connect(lambda: self._set_all_filtered_selection(True))
-        layout.addWidget(self.select_all_button)
-
-        self.clear_all_button = QPushButton("Limpar todos")
-        self.clear_all_button.clicked.connect(lambda: self._set_all_filtered_selection(False))
-        layout.addWidget(self.clear_all_button)
 
         return frame
 
@@ -331,7 +414,29 @@ class MainWindow(QMainWindow):
         table.setTextElideMode(Qt.TextElideMode.ElideRight)
         table.setWordWrap(True)
         table.clicked.connect(self._on_table_clicked)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_table_context_menu)
+        table.setItemDelegateForColumn(0, CircleCheckDelegate(table))
+        self.table_send_button = SendCornerButton(table)
+        self.table_send_button.setObjectName("TableSendButton")
+        self.table_send_button.setToolTip("Enviar registros marcados para a Planilha automática")
+        self.table_send_button.clicked.connect(self._send_marked_rows_to_automatic)
+        self.table_send_button.setEnabled(False)
+        self.table_send_button.raise_()
+        QTimer.singleShot(0, self._position_table_send_button)
         return table
+
+    def _position_table_send_button(self) -> None:
+        if not hasattr(self, "table_send_button"):
+            return
+        frame_width = self.table.frameWidth()
+        width = self.table.verticalHeader().width()
+        height = max(self.table.horizontalHeader().height(), 28)
+        if width <= 0:
+            self.table_send_button.hide()
+            return
+        self.table_send_button.setGeometry(frame_width, frame_width, width, height)
+        self.table_send_button.raise_()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -392,7 +497,7 @@ class MainWindow(QMainWindow):
             QPushButton#SuccessButton:hover {
                 background: #126c50;
             }
-            QLineEdit, QSpinBox {
+            QLineEdit {
                 background: #ffffff;
                 border: 1px solid #cfd9e8;
                 border-radius: 6px;
@@ -405,6 +510,23 @@ class MainWindow(QMainWindow):
                 gridline-color: #dde4ef;
                 selection-background-color: #cfe0ff;
                 selection-color: #172033;
+            }
+            QPushButton#TableSendButton {
+                background: #ffffff;
+                border: 1px solid #dde4ef;
+                border-radius: 0;
+                color: #172033;
+                font-size: 16px;
+                font-weight: 800;
+                padding: 0;
+            }
+            QPushButton#TableSendButton:hover {
+                background: #eef3f9;
+                border-color: #9bb8df;
+            }
+            QPushButton#TableSendButton:disabled {
+                color: #a8b2c1;
+                background: #f8fafc;
             }
             QHeaderView::section {
                 background: #245783;
@@ -567,6 +689,7 @@ class MainWindow(QMainWindow):
             self._duplicates_mode = False
         self._current_search = ""
         self.search_input.clear()
+        self._marked_guest_ids.clear()
         self._current_page = 0
         self._load_sheet_tabs()
 
@@ -866,6 +989,7 @@ class MainWindow(QMainWindow):
         else:
             self._current_import_id = tab_data["import_id"]
             self._current_sheet_selectable = bool(tab_data["selectable"])
+        self._marked_guest_ids.clear()
         self._current_page = 0
         self._load_table()
 
@@ -884,6 +1008,7 @@ class MainWindow(QMainWindow):
         if search == self._current_search:
             return
         self._current_search = search
+        self._marked_guest_ids.clear()
         self._current_page = 0
         self._load_table()
 
@@ -891,10 +1016,6 @@ class MainWindow(QMainWindow):
         self.search_input.clear()
         self._search_timer.stop()
         self._apply_search_text("")
-
-    def _change_page_size(self) -> None:
-        self._current_page = 0
-        self._load_table()
 
     def _load_table(self) -> None:
         if self._automatic_mode:
@@ -921,7 +1042,7 @@ class MainWindow(QMainWindow):
                 import_id=import_id,
                 workbook_id=workbook_id,
                 page=self._current_page,
-                page_size=self.page_size_input.value(),
+                page_size=DEFAULT_PAGE_SIZE,
                 search=self._current_search,
                 selected_only=selected_only,
                 duplicates_only=duplicates_only,
@@ -957,6 +1078,7 @@ class MainWindow(QMainWindow):
             rows,
             columns,
             editable_columns,
+            self._marked_guest_ids,
             self._on_row_selection_changed,
             self._on_cell_changed,
             highlight_selected_rows=not self._automatic_mode,
@@ -970,6 +1092,7 @@ class MainWindow(QMainWindow):
             self.table.setColumnWidth(4, 190)
         if self._table_model.has_multiline_cells():
             self.table.resizeRowsToContents()
+        self._position_table_send_button()
         self._update_filter_button_text(columns)
         self._update_page_label()
         self._update_actions()
@@ -999,43 +1122,226 @@ class MainWindow(QMainWindow):
 
     def _on_row_selection_changed(self, guest_id: int, selected: bool) -> None:
         try:
-            selected_guest_id = guest_id
-            if selected and not self._automatic_mode:
-                reviewed_guest_id = self._review_duplicate_selection(guest_id)
-                if reviewed_guest_id is None:
+            if selected:
+                self._marked_guest_ids.add(guest_id)
+                self.status_label.setText(
+                    f"{len(self._marked_guest_ids)} registros marcados para envio."
+                )
+            else:
+                row = self._table_rows_by_guest_id().get(guest_id)
+                self._marked_guest_ids.discard(guest_id)
+                if row is not None and row.selected:
+                    self._view_model.set_guest_selected(guest_id, False)
+                    self._refresh_automatic_tab_label()
                     self._load_table()
                     return
-                selected_guest_id = reviewed_guest_id
-                if not self._confirm_automatic_conflicts(selected_guest_id):
-                    self._load_table()
-                    return
-
-            self._view_model.set_guest_selected(selected_guest_id, selected)
-            if selected and selected_guest_id != guest_id:
-                self.status_label.setText("Registro selecionado após revisão de duplicidade.")
-            self._refresh_automatic_tab_label()
-            self._load_table()
+                self.status_label.setText(
+                    f"{len(self._marked_guest_ids)} registros marcados para envio."
+                )
+            self._update_actions()
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao selecionar", str(exc))
 
-    def _review_duplicate_selection(self, guest_id: int) -> int | None:
-        candidates = self._view_model.list_duplicate_candidates(guest_id)
-        if len(candidates) <= 1:
-            return guest_id
+    def _select_guest_for_automatic(self, guest_id: int) -> int | None:
+        selected_guest_id = guest_id
+        if not self._automatic_mode:
+            reviewed_guest_id = self._review_duplicate_selection(guest_id)
+            if reviewed_guest_id is None:
+                return None
+            selected_guest_id = reviewed_guest_id
+            if not self._confirm_automatic_conflicts(selected_guest_id):
+                return None
+
+        self._view_model.set_guest_selected(selected_guest_id, True)
+        return selected_guest_id
+
+    def _review_and_send_guest_batch(self, guest_ids: list[int]) -> bool:
+        selected_guest_ids = self._show_batch_automatic_selection_dialog(guest_ids)
+        if selected_guest_ids is None:
+            return False
+
+        unique_guest_ids = self._unique_guest_ids(selected_guest_ids)
+        if not unique_guest_ids:
+            QMessageBox.information(
+                self,
+                "Enviar para Planilha automática",
+                "Nenhum registro foi marcado para envio.",
+            )
+            return False
+
+        if not self._confirm_batch_automatic_conflicts(unique_guest_ids):
+            return False
+
+        self._marked_guest_ids.clear()
+        updated_rows = self._view_model.set_page_selected(unique_guest_ids, True)
+        self._refresh_automatic_tab_label()
+        self.status_label.setText(f"{updated_rows} registros enviados para a Planilha automática.")
+        self._load_table()
+        return True
+
+    def _show_batch_automatic_selection_dialog(self, guest_ids: list[int]) -> list[int] | None:
+        source_rows = self._table_rows_by_guest_id()
+        review_rows: list[dict[str, object]] = []
+
+        for group_index, guest_id in enumerate(self._unique_guest_ids(guest_ids), start=1):
+            candidates = self._view_model.list_duplicate_candidates(guest_id)
+            if not candidates and guest_id in source_rows:
+                candidates = [source_rows[guest_id]]
+            if not candidates:
+                continue
+
+            has_duplicates = len(candidates) > 1
+            primary_candidate = candidates[0]
+            primary_name = self._guest_value_by_headers(primary_candidate, DIALOG_NAME_WORDS)
+            group_label = f"{group_index} - {primary_name or primary_candidate.verification_code}"
+            for candidate in candidates:
+                review_rows.append(
+                    {
+                        "group": guest_id,
+                        "item": group_index,
+                        "group_label": group_label,
+                        "row": candidate,
+                        "checked": False,
+                        "status": "Duplicidade encontrada" if has_duplicates else "Pronto para enviar",
+                    }
+                )
+
+        if not review_rows:
+            return []
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Duplicidade encontrada")
-        dialog.resize(1220, 440)
+        dialog.setWindowTitle("Enviar para Planilha automática")
+        dialog.resize(1480, 620)
         layout = QVBoxLayout(dialog)
 
         message = QLabel(
-            "Encontrei duplicidade. Selecione o registro correto para enviar para a Planilha automática."
+            "Revise os registros antes de enviar. Quando houver duplicidade, marque uma ou mais opções "
+            "do mesmo item conforme precisar. Desmarque um item se não quiser enviá-lo agora."
         )
         message.setWordWrap(True)
         layout.addWidget(message)
 
-        table = self._build_guest_review_table(candidates)
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(8)
+        filter_layout.addWidget(QLabel("Filtro"))
+
+        review_filter_input = QLineEdit()
+        review_filter_input.setPlaceholderText("Buscar por nome, telefone, e-mail, CEP, endereço ou código")
+        review_filter_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        filter_layout.addWidget(review_filter_input, 1)
+
+        review_group_filter = QComboBox()
+        review_group_filter.addItem("Todos os itens", "all")
+        review_group_filter.addItem("Somente duplicidades", "duplicates")
+        group_labels: dict[int, str] = {}
+        for review_row in review_rows:
+            group_id = int(review_row["group"])
+            group_labels.setdefault(group_id, str(review_row["group_label"]))
+        for group_id, group_label in group_labels.items():
+            review_group_filter.addItem(group_label, f"group:{group_id}")
+        filter_layout.addWidget(review_group_filter)
+        layout.addLayout(filter_layout)
+
+        table = QTableWidget(len(review_rows), 12)
+        table.setItemDelegateForColumn(0, CircleCheckDelegate(table))
+        table.setHorizontalHeaderLabels(
+            [
+                "Enviar",
+                "Item",
+                "Situação",
+                "Código",
+                "Duplicidade",
+                "Lista",
+                "Nome",
+                "Telefone",
+                "Celular",
+                "E-mail",
+                "CEP",
+                "Endereço",
+            ]
+        )
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+
+        candidate_role = Qt.ItemDataRole.UserRole
+        group_role = Qt.ItemDataRole.UserRole + 1
+
+        table.blockSignals(True)
+        for row_index, review_row in enumerate(review_rows):
+            candidate = review_row["row"]
+            values = [
+                "",
+                str(review_row["item"]),
+                str(review_row["status"]),
+                candidate.verification_code,
+                self._format_duplicate_label(candidate),
+                candidate.sheet_name,
+                self._guest_value_by_headers(candidate, DIALOG_NAME_WORDS),
+                self._guest_phone_value(candidate),
+                self._guest_mobile_value(candidate),
+                self._guest_email_value(candidate),
+                self._guest_cep_value(candidate),
+                self._guest_address_value(candidate),
+            ]
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                if column_index == 0:
+                    item.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled
+                        | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    item.setCheckState(
+                        Qt.CheckState.Checked
+                        if bool(review_row["checked"])
+                        else Qt.CheckState.Unchecked
+                    )
+                    item.setData(candidate_role, candidate.id)
+                    item.setData(group_role, review_row["group"])
+                elif column_index == 2 and str(review_row["status"]).startswith("Duplicidade"):
+                    item.setForeground(QBrush(QColor("#9a4d00")))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                elif column_index == 4 and candidate.duplicate_count > 1:
+                    item.setForeground(QBrush(QColor("#9a4d00")))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                table.setItem(row_index, column_index, item)
+        table.blockSignals(False)
+
         layout.addWidget(table, 1)
+
+        def apply_review_filters() -> None:
+            search_text = review_filter_input.text().strip().casefold()
+            selected_filter = str(review_group_filter.currentData())
+            for table_row in range(table.rowCount()):
+                review_row = review_rows[table_row]
+                candidate = review_row["row"]
+                row_text = " ".join(
+                    str(table.item(table_row, column_index).text())
+                    for column_index in range(table.columnCount())
+                    if table.item(table_row, column_index) is not None
+                ).casefold()
+                matches_search = not search_text or search_text in row_text
+                if selected_filter == "duplicates":
+                    matches_filter = candidate.duplicate_count > 1
+                elif selected_filter.startswith("group:"):
+                    matches_filter = str(review_row["group"]) == selected_filter.split(":", 1)[1]
+                else:
+                    matches_filter = True
+                table.setRowHidden(table_row, not (matches_search and matches_filter))
+
+        review_filter_input.textChanged.connect(apply_review_filters)
+        review_group_filter.currentIndexChanged.connect(apply_review_filters)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1043,16 +1349,223 @@ class MainWindow(QMainWindow):
         ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
         if ok_button is not None:
-            ok_button.setText("Enviar selecionado")
+            ok_button.setText("Enviar marcados")
         if cancel_button is not None:
             cancel_button.setText("Cancelar")
+
+        def checked_candidate_ids() -> list[int]:
+            selected_ids: list[int] = []
+            for table_row in range(table.rowCount()):
+                item = table.item(table_row, 0)
+                if item is None or item.checkState() != Qt.CheckState.Checked:
+                    continue
+                selected_ids.append(int(item.data(candidate_role)))
+            return selected_ids
+
+        def accept_if_valid() -> None:
+            if not checked_candidate_ids():
+                QMessageBox.information(
+                    dialog,
+                    "Enviar para Planilha automática",
+                    "Marque pelo menos um registro para enviar.",
+                )
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_if_valid)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        table.resizeColumnsToContents()
+        table.resizeRowsToContents()
+        table.setColumnWidth(0, 70)
+        table.setColumnWidth(1, 60)
+        table.setColumnWidth(2, 150)
+        table.setColumnWidth(3, 90)
+        table.setColumnWidth(4, 120)
+        table.setColumnWidth(5, 140)
+        table.setColumnWidth(6, 240)
+        table.setColumnWidth(7, 130)
+        table.setColumnWidth(8, 130)
+        table.setColumnWidth(9, 190)
+        table.setColumnWidth(10, 110)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return checked_candidate_ids()
+
+    def _confirm_batch_automatic_conflicts(self, guest_ids: list[int]) -> bool:
+        conflicts: list[GuestRowDTO] = []
+        seen: set[int] = set()
+        for guest_id in guest_ids:
+            for conflict in self._view_model.list_automatic_conflicts(guest_id):
+                if conflict.id in seen:
+                    continue
+                conflicts.append(conflict)
+                seen.add(conflict.id)
+
+        if not conflicts:
+            return True
+
+        selected_candidate = self._show_guest_review_dialog(
+            title="Conferir Planilha automática",
+            message=(
+                "Já existem dados parecidos na Planilha automática. "
+                "Confira os registros abaixo antes de adicionar o lote."
+            ),
+            rows=conflicts,
+            accept_text="Adicionar lote mesmo assim",
+            cancel_text="Cancelar",
+            selectable=False,
+        )
+        return selected_candidate is not None
+
+    def _highlighted_guest_ids_for_batch(self, current_guest_id: int) -> list[int]:
+        if (
+            self._table_model is None
+            or self.table.selectionModel() is None
+            or self._automatic_mode
+            or self._duplicates_mode
+            or not self._current_sheet_selectable
+        ):
+            return [current_guest_id]
+
+        row_indexes = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        guest_ids: list[int] = []
+        seen: set[int] = set()
+        for row_index in row_indexes:
+            row = self._table_model.row_at(row_index)
+            if row is None or not row.selectable or row.id in seen:
+                continue
+            if row.id != current_guest_id and row.selected:
+                continue
+            guest_ids.append(row.id)
+            seen.add(row.id)
+
+        if current_guest_id not in seen:
+            guest_ids.append(current_guest_id)
+        return guest_ids
+
+    def _table_rows_by_guest_id(self) -> dict[int, GuestRowDTO]:
+        if self._table_model is None:
+            return {}
+
+        rows: dict[int, GuestRowDTO] = {}
+        for row_index in range(self._table_model.rowCount()):
+            row = self._table_model.row_at(row_index)
+            if row is not None:
+                rows[row.id] = row
+        return rows
+
+    def _unique_guest_ids(self, guest_ids: list[int]) -> list[int]:
+        unique_guest_ids: list[int] = []
+        seen: set[int] = set()
+        for guest_id in guest_ids:
+            if guest_id in seen:
+                continue
+            unique_guest_ids.append(guest_id)
+            seen.add(guest_id)
+        return unique_guest_ids
+
+    def _review_duplicate_selection(self, guest_id: int) -> int | None:
+        candidates = self._view_model.list_duplicate_candidates(guest_id)
+        if len(candidates) <= 1:
+            return guest_id
+
+        selected_candidate = self._show_guest_review_dialog(
+            title="Duplicidade encontrada",
+            message="Encontrei registros parecidos. Selecione qual deve ir para a Planilha automática.",
+            rows=candidates,
+            accept_text="Enviar selecionado",
+            cancel_text="Cancelar",
+            selectable=True,
+        )
+        if selected_candidate is None:
+            return None
+        return selected_candidate
+
+    def _confirm_automatic_conflicts(self, guest_id: int) -> bool:
+        conflicts = self._view_model.list_automatic_conflicts(guest_id)
+        if not conflicts:
+            return True
+
+        selected_candidate = self._show_guest_review_dialog(
+            title="Conferir Planilha automática",
+            message=(
+                "Já existem dados parecidos na Planilha automática. "
+                "Confira nome, telefone, celular, e-mail, CEP e endereço antes de adicionar."
+            ),
+            rows=conflicts,
+            accept_text="Adicionar mesmo assim",
+            cancel_text="Cancelar",
+            selectable=False,
+        )
+        return selected_candidate is not None
+
+    def _show_duplicate_candidates_for_row(self, row_index: int) -> None:
+        if self._table_model is None:
+            return
+        row = self._table_model.row_at(row_index)
+        if row is None or row.duplicate_count <= 1:
+            self.status_label.setText("Esta linha não possui duplicidade identificada.")
+            return
+
+        candidates = self._view_model.list_duplicate_candidates(row.id)
+        if len(candidates) <= 1:
+            self.status_label.setText("Nenhuma duplicidade encontrada para esta linha.")
+            return
+
+        self._show_guest_review_dialog(
+            title="Duplicidades da linha",
+            message="Registros parecidos encontrados para esta linha.",
+            rows=candidates,
+            accept_text="Fechar",
+            cancel_text="",
+            selectable=False,
+        )
+
+    def _show_guest_review_dialog(
+        self,
+        title: str,
+        message: str,
+        rows: list[GuestRowDTO],
+        accept_text: str,
+        cancel_text: str,
+        selectable: bool,
+    ) -> int | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(1320, 520)
+        layout = QVBoxLayout(dialog)
+
+        message_label = QLabel(message)
+        message_label.setWordWrap(True)
+        layout.addWidget(message_label)
+
+        table = self._build_guest_review_table(rows)
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        if cancel_text:
+            buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText(accept_text)
+        if cancel_button is not None:
+            cancel_button.setText(cancel_text)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        table.itemDoubleClicked.connect(lambda _: dialog.accept())
+        if selectable:
+            table.itemDoubleClicked.connect(lambda _: dialog.accept())
+
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
+        if not selectable:
+            return rows[0].id if rows else 0
 
         selected_ranges = table.selectedRanges()
         if not selected_ranges:
@@ -1063,49 +1576,17 @@ class MainWindow(QMainWindow):
             return None
         return int(item.data(Qt.ItemDataRole.UserRole))
 
-    def _confirm_automatic_conflicts(self, guest_id: int) -> bool:
-        conflicts = self._view_model.list_automatic_conflicts(guest_id)
-        if not conflicts:
-            return True
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Conferir Planilha automática")
-        dialog.resize(1220, 440)
-        layout = QVBoxLayout(dialog)
-
-        message = QLabel(
-            "Já tem dados parecidos com esses na Planilha automática. "
-            "Confira nome, telefone, celular, e-mail, CEP e endereço antes de adicionar."
-        )
-        message.setWordWrap(True)
-        layout.addWidget(message)
-
-        table = self._build_guest_review_table(conflicts)
-        layout.addWidget(table, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        if ok_button is not None:
-            ok_button.setText("Adicionar mesmo assim")
-        if cancel_button is not None:
-            cancel_button.setText("Cancelar")
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        return dialog.exec() == QDialog.DialogCode.Accepted
-
     def _build_guest_review_table(self, rows: list[GuestRowDTO]) -> QTableWidget:
         table = QTableWidget(len(rows), 9)
         table.setHorizontalHeaderLabels(
             ["Código", "Duplicidade", "Lista", "Nome", "Telefone", "Celular", "E-mail", "CEP", "Endereço"]
         )
+        table.setAlternatingRowColors(True)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
 
@@ -1125,6 +1606,11 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 if column_index == 0:
                     item.setData(Qt.ItemDataRole.UserRole, row.id)
+                if column_index == 1 and row.duplicate_count > 1:
+                    item.setForeground(QBrush(QColor("#9a4d00")))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 item.setToolTip(str(value))
                 table.setItem(row_index, column_index, item)
 
@@ -1132,6 +1618,15 @@ class MainWindow(QMainWindow):
             table.selectRow(0)
         table.resizeColumnsToContents()
         table.resizeRowsToContents()
+        table.setColumnWidth(0, 90)
+        table.setColumnWidth(1, 120)
+        table.setColumnWidth(2, 140)
+        table.setColumnWidth(3, 240)
+        table.setColumnWidth(4, 130)
+        table.setColumnWidth(5, 130)
+        table.setColumnWidth(6, 190)
+        table.setColumnWidth(7, 120)
+        table.setMinimumHeight(300)
         return table
 
     def _format_duplicate_label(self, row: GuestRowDTO) -> str:
@@ -1260,18 +1755,183 @@ class MainWindow(QMainWindow):
             return False
 
     def _on_table_clicked(self, index: QModelIndex) -> None:
-        if not index.isValid() or index.column() != 0 or self._table_model is None:
+        if not index.isValid() or self._table_model is None:
             return
-        self._table_model.toggle_selection(index.row())
+        if index.column() == 0:
+            return
+        if index.column() == 2:
+            self._show_duplicate_candidates_for_row(index.row())
+
+    def _show_table_context_menu(self, position: object) -> None:
+        if self._table_model is None:
+            return
+
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+
+        if self.table.selectionModel() is not None and not self.table.selectionModel().isSelected(index):
+            self.table.selectRow(index.row())
+
+        menu = QMenu(self)
+        row = self._table_model.row_at(index.row())
+        if row is not None and row.duplicate_count > 1:
+            view_duplicates_action = menu.addAction("Ver duplicidades da linha")
+            menu.addSeparator()
+        else:
+            view_duplicates_action = None
+
+        can_send = (
+            self._current_sheet_selectable
+            and not self._automatic_mode
+            and not self._duplicates_mode
+            and bool(self._selected_table_guest_ids(selected_state=False))
+        )
+        can_remove = bool(self._selected_table_guest_ids(selected_state=True))
+        send_action = menu.addAction("Enviar linhas selecionadas para a Planilha automática")
+        send_action.setEnabled(can_send)
+        remove_action = menu.addAction("Remover linhas selecionadas da Planilha automática")
+        remove_action.setEnabled(can_remove)
+
+        selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
+        if view_duplicates_action is not None and selected_action == view_duplicates_action:
+            self._show_duplicate_candidates_for_row(index.row())
+        elif selected_action == send_action:
+            self._send_highlighted_rows_to_automatic()
+        elif selected_action == remove_action:
+            self._clear_highlighted_rows_from_automatic()
+
+    def _send_highlighted_rows_to_automatic(self) -> None:
+        if self._table_model is None:
+            return
+        if self._automatic_mode:
+            QMessageBox.information(
+                self,
+                "Planilha automática",
+                "Você já está visualizando a Planilha automática.",
+            )
+            return
+        if self._duplicates_mode or not self._current_sheet_selectable:
+            QMessageBox.information(
+                self,
+                "Enviar selecionados",
+                "Abra uma aba de contatos antes de enviar registros para a Planilha automática.",
+            )
+            return
+
+        guest_ids = self._selected_table_guest_ids(selected_state=False)
+        if not guest_ids:
+            QMessageBox.information(
+                self,
+                "Enviar selecionados",
+                "Selecione uma ou mais linhas ainda não marcadas antes de enviar.",
+            )
+            return
+
+        try:
+            self._review_and_send_guest_batch(guest_ids)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao enviar selecionados", str(exc))
+
+    def _send_marked_rows_to_automatic(self) -> None:
+        if self._automatic_mode:
+            QMessageBox.information(
+                self,
+                "Planilha automática",
+                "Você já está visualizando a Planilha automática.",
+            )
+            return
+        if self._duplicates_mode or not self._current_sheet_selectable:
+            QMessageBox.information(
+                self,
+                "Enviar marcados",
+                "Abra uma aba de contatos antes de enviar registros para a Planilha automática.",
+            )
+            return
+
+        guest_ids = sorted(self._marked_guest_ids)
+        if not guest_ids:
+            QMessageBox.information(
+                self,
+                "Enviar marcados",
+                "Marque uma ou mais caixinhas antes de enviar.",
+            )
+            return
+
+        try:
+            self._review_and_send_guest_batch(guest_ids)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao enviar marcados", str(exc))
+
+    def _clear_highlighted_rows_from_automatic(self) -> None:
+        if self._table_model is None:
+            return
+
+        guest_ids = self._selected_table_guest_ids(selected_state=True)
+        if not guest_ids:
+            QMessageBox.information(
+                self,
+                "Remover selecionados",
+                "Selecione uma ou mais linhas marcadas antes de remover.",
+            )
+            return
+
+        try:
+            updated_rows = self._view_model.set_page_selected(guest_ids, False)
+            self._refresh_automatic_tab_label()
+            self.status_label.setText(f"{updated_rows} registros removidos da Planilha automática.")
+            self._load_table()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao remover selecionados", str(exc))
+
+    def _selected_table_guest_ids(self, selected_state: bool | None = None) -> list[int]:
+        if self._table_model is None or self.table.selectionModel() is None:
+            return []
+
+        row_indexes = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        guest_ids: list[int] = []
+        seen: set[int] = set()
+        for row_index in row_indexes:
+            row = self._table_model.row_at(row_index)
+            if row is None or not row.selectable or row.id in seen:
+                continue
+            if selected_state is not None and row.selected != selected_state:
+                continue
+            guest_ids.append(row.id)
+            seen.add(row.id)
+        return guest_ids
 
     def _set_page_selection(self, selected: bool) -> None:
         if self._table_model is None:
             return
-        guest_ids = self._table_model.guest_ids()
-        if not guest_ids:
+
+        if selected and not self._automatic_mode and not self._duplicates_mode:
+            marked_rows = 0
+            for row_index in range(self._table_model.rowCount()):
+                row = self._table_model.row_at(row_index)
+                if row is None or not row.selectable or row.selected:
+                    continue
+                if self._table_model.set_row_selection(row_index, True):
+                    marked_rows += 1
+            self.status_label.setText(f"{marked_rows} registros marcados nesta página.")
+            self._update_actions()
             return
+
+        page_rows = [
+            self._table_model.row_at(row_index)
+            for row_index in range(self._table_model.rowCount())
+        ]
+        page_guest_ids = [row.id for row in page_rows if row is not None and row.selectable]
+        selected_guest_ids = [row.id for row in page_rows if row is not None and row.selectable and row.selected]
+        for guest_id in page_guest_ids:
+            self._marked_guest_ids.discard(guest_id)
+
+        if not selected_guest_ids:
+            self._load_table()
+            return
+
         try:
-            self._view_model.set_page_selected(guest_ids, selected)
+            self._view_model.set_page_selected(selected_guest_ids, False)
             self._refresh_automatic_tab_label()
             self._load_table()
         except Exception as exc:
@@ -1338,12 +1998,11 @@ class MainWindow(QMainWindow):
         if tab_data["kind"] == "duplicates":
             return
 
-        menu = QMenu(self)
-        rename_action = menu.addAction("Renomear planilha")
-        delete_action = menu.addAction("Excluir planilha")
-        selected_action = menu.exec(self.workbook_tabs.mapToGlobal(position))
-
         if tab_data["kind"] == "automatic":
+            menu = QMenu(self)
+            rename_action = menu.addAction("Renomear planilha")
+            delete_action = menu.addAction("Excluir planilha")
+            selected_action = menu.exec(self.workbook_tabs.mapToGlobal(position))
             if selected_action == rename_action:
                 self._rename_automatic_sheet()
             elif selected_action == delete_action:
@@ -1353,10 +2012,19 @@ class MainWindow(QMainWindow):
         if tab_data["kind"] != "workbook":
             return
 
+        menu = QMenu(self)
+        rename_action = menu.addAction("Renomear planilha")
+        merge_action = menu.addAction("Unificar com outra planilha...")
+        merge_action.setEnabled(len(self._view_model.list_workbooks()) > 1)
+        delete_action = menu.addAction("Excluir planilha")
+        selected_action = menu.exec(self.workbook_tabs.mapToGlobal(position))
+
         workbook_id = int(tab_data["workbook_id"])
         workbook_name = self.workbook_tabs.tabText(index)
         if selected_action == rename_action:
             self._rename_workbook(workbook_id, workbook_name)
+        elif selected_action == merge_action:
+            self._merge_workbook(workbook_id)
         elif selected_action == delete_action:
             self._delete_workbook(workbook_id, workbook_name)
 
@@ -1376,6 +2044,76 @@ class MainWindow(QMainWindow):
             self._load_workbooks(preferred_workbook_id=workbook_id)
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao renomear", str(exc))
+
+    def _merge_workbook(self, source_workbook_id: int) -> None:
+        workbooks = self._view_model.list_workbooks()
+        source_workbook = next((workbook for workbook in workbooks if workbook.id == source_workbook_id), None)
+        target_workbooks = [workbook for workbook in workbooks if workbook.id != source_workbook_id]
+        if source_workbook is None or not target_workbooks:
+            QMessageBox.information(
+                self,
+                "Unificar planilhas",
+                "Importe pelo menos duas planilhas para usar a unificação.",
+            )
+            return
+
+        label_by_id = self._workbook_merge_labels(target_workbooks)
+        target_label, accepted = QInputDialog.getItem(
+            self,
+            "Unificar planilhas",
+            (
+                f"As abas de '{source_workbook.display_name}' serão movidas para a planilha escolhida.\n"
+                "Escolha a planilha de destino:"
+            ),
+            list(label_by_id.values()),
+            0,
+            False,
+        )
+        if not accepted or not target_label:
+            return
+
+        target_workbook_id = next(
+            workbook_id
+            for workbook_id, label in label_by_id.items()
+            if label == target_label
+        )
+        target_workbook = next(workbook for workbook in target_workbooks if workbook.id == target_workbook_id)
+        answer = QMessageBox.question(
+            self,
+            "Confirmar unificação",
+            (
+                f"Deseja unificar '{source_workbook.display_name}' em '{target_workbook.display_name}'?\n\n"
+                "As abas da origem serão movidas para o destino e a aba superior da origem sairá da lista."
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            result = self._view_model.merge_workbooks(
+                source_workbook_id=source_workbook_id,
+                target_workbook_id=target_workbook_id,
+            )
+            self.status_label.setText(
+                f"{result.moved_sheets} abas e {result.moved_rows} linhas unificadas."
+            )
+            self._load_workbooks(preferred_workbook_id=target_workbook_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao unificar", str(exc))
+
+    def _workbook_merge_labels(self, workbooks: list[object]) -> dict[int, str]:
+        base_labels = [self._workbook_merge_label(workbook) for workbook in workbooks]
+        return {
+            workbook.id: (
+                f"{base_label} - ID {workbook.id}"
+                if base_labels.count(base_label) > 1
+                else base_label
+            )
+            for workbook, base_label in zip(workbooks, base_labels)
+        }
+
+    def _workbook_merge_label(self, workbook: object) -> str:
+        return f"{workbook.display_name} ({workbook.total_rows})"
 
     def _rename_automatic_sheet(self) -> None:
         new_name, accepted = QInputDialog.getText(
@@ -1477,18 +2215,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro ao exportar", str(exc))
 
     def _go_first_page(self) -> None:
+        self._marked_guest_ids.clear()
         self._current_page = 0
         self._load_table()
 
     def _go_previous_page(self) -> None:
+        self._marked_guest_ids.clear()
         self._current_page = max(self._current_page - 1, 0)
         self._load_table()
 
     def _go_next_page(self) -> None:
+        self._marked_guest_ids.clear()
         self._current_page += 1
         self._load_table()
 
     def _go_last_page(self) -> None:
+        self._marked_guest_ids.clear()
         self._current_page = max(ceil(self._total_rows / max(self._page_size, 1)) - 1, 0)
         self._load_table()
 
@@ -1503,11 +2245,9 @@ class MainWindow(QMainWindow):
             self.search_input,
             self.search_button,
             self.clear_search_button,
+            self.table_send_button,
             self.select_page_button,
             self.clear_page_button,
-            self.select_all_button,
-            self.clear_all_button,
-            self.page_size_input,
         )
         for widget in widgets:
             widget.setEnabled(not busy)
@@ -1534,10 +2274,10 @@ class MainWindow(QMainWindow):
         self.clear_search_button.setEnabled(has_workspace)
         self.filter_button.setEnabled(has_workspace and bool(self._available_columns))
         self.export_button.setEnabled(has_workbook or self._automatic_mode)
+        self.table_send_button.setVisible(can_select)
+        self.table_send_button.setEnabled(can_select and bool(self._marked_guest_ids))
         self.select_page_button.setEnabled(can_select)
         self.clear_page_button.setEnabled(can_clear_page)
-        self.select_all_button.setEnabled(can_select)
-        self.clear_all_button.setEnabled(can_select or (self._automatic_mode and self._total_rows > 0))
         self.first_page_button.setEnabled(self._current_page > 0)
         self.previous_page_button.setEnabled(self._current_page > 0)
         self.next_page_button.setEnabled(has_next)

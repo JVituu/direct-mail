@@ -43,6 +43,15 @@ class WorkbookImportResultDTO:
     skipped_sheets: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class WorkbookMergeResultDTO:
+    source_workbook_id: int
+    target_workbook_id: int
+    moved_sheets: int
+    moved_rows: int
+    target_total_rows: int
+
+
 @dataclass(slots=True)
 class GuestRowDTO:
     id: int

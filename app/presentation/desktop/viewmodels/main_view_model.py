@@ -5,6 +5,7 @@ from app.application.dtos.guest_dto import (
     GuestRowDTO,
     ImportResultDTO,
     ImportSummaryDTO,
+    WorkbookMergeResultDTO,
     WorkbookImportResultDTO,
     WorkbookSummaryDTO,
 )
@@ -13,6 +14,7 @@ from app.application.use_cases.export_selected_guests import ExportSelectedGuest
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase, ListWorkbooksUseCase
 from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
+from app.application.use_cases.merge_workbooks import MergeWorkbooksUseCase
 from app.application.use_cases.rename_workbook import RenameWorkbookUseCase
 from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
@@ -42,6 +44,7 @@ class MainViewModel:
         self._update_guest_data = UpdateGuestDataUseCase(guest_repository)
         self._update_selection = UpdateGuestSelectionUseCase(guest_repository)
         self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
+        self._merge_workbooks = MergeWorkbooksUseCase(guest_repository)
         self._rename_workbook = RenameWorkbookUseCase(guest_repository)
         self._manage_automatic_sheet = ManageAutomaticSheetUseCase(guest_repository)
         self._review_duplicate_selection = ReviewDuplicateSelectionUseCase(guest_repository)
@@ -143,6 +146,13 @@ class MainViewModel:
 
     def delete_workbook(self, workbook_id: int) -> None:
         self._delete_workbook.execute(workbook_id)
+
+    def merge_workbooks(
+        self,
+        source_workbook_id: int,
+        target_workbook_id: int,
+    ) -> WorkbookMergeResultDTO:
+        return self._merge_workbooks.execute(source_workbook_id, target_workbook_id)
 
     def rename_workbook(self, workbook_id: int, display_name: str) -> None:
         self._rename_workbook.execute(workbook_id, display_name)

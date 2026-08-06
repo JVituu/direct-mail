@@ -202,6 +202,130 @@ class SqliteGuestRepository:
             connection.execute("DELETE FROM imports WHERE workbook_id = ?", (workbook_id,))
             connection.execute("DELETE FROM workbooks WHERE id = ?", (workbook_id,))
 
+    def merge_workbooks(
+        self,
+        source_workbook_id: int,
+        target_workbook_id: int,
+    ) -> tuple[int, int, int]:
+        if source_workbook_id == target_workbook_id:
+            raise ValueError("Escolha duas planilhas diferentes para unificar.")
+
+        with connect(self._database_path) as connection:
+            source_workbook = connection.execute(
+                """
+                SELECT id, display_name
+                FROM workbooks
+                WHERE id = ?
+                """,
+                (source_workbook_id,),
+            ).fetchone()
+            if source_workbook is None:
+                raise ValueError("Planilha de origem não encontrada.")
+
+            target_workbook = connection.execute(
+                """
+                SELECT id
+                FROM workbooks
+                WHERE id = ?
+                """,
+                (target_workbook_id,),
+            ).fetchone()
+            if target_workbook is None:
+                raise ValueError("Planilha de destino não encontrada.")
+
+            source_imports = connection.execute(
+                """
+                SELECT id, sheet_name, total_rows
+                FROM imports
+                WHERE workbook_id = ?
+                ORDER BY id ASC
+                """,
+                (source_workbook_id,),
+            ).fetchall()
+            if not source_imports:
+                raise ValueError("A planilha de origem não possui abas para unificar.")
+
+            existing_sheet_names = {
+                str(row["sheet_name"])
+                for row in connection.execute(
+                    """
+                    SELECT sheet_name
+                    FROM imports
+                    WHERE workbook_id = ?
+                    """,
+                    (target_workbook_id,),
+                ).fetchall()
+            }
+
+            source_display_name = str(source_workbook["display_name"])
+            for imported_sheet in source_imports:
+                original_sheet_name = str(imported_sheet["sheet_name"])
+                merged_sheet_name = self._unique_merged_sheet_name(
+                    original_sheet_name,
+                    existing_sheet_names,
+                    source_display_name,
+                )
+                existing_sheet_names.add(merged_sheet_name)
+                if merged_sheet_name == original_sheet_name:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE imports
+                    SET sheet_name = ?
+                    WHERE id = ?
+                    """,
+                    (merged_sheet_name, imported_sheet["id"]),
+                )
+                connection.execute(
+                    """
+                    UPDATE automatic_guests
+                    SET sheet_name = ?
+                    WHERE source_import_id = ?
+                    """,
+                    (merged_sheet_name, imported_sheet["id"]),
+                )
+
+            connection.execute(
+                """
+                UPDATE imports
+                SET workbook_id = ?
+                WHERE workbook_id = ?
+                """,
+                (target_workbook_id, source_workbook_id),
+            )
+            connection.execute(
+                """
+                UPDATE automatic_guests
+                SET source_workbook_id = ?
+                WHERE source_workbook_id = ?
+                """,
+                (target_workbook_id, source_workbook_id),
+            )
+
+            target_total_rows = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(total_rows), 0)
+                    FROM imports
+                    WHERE workbook_id = ?
+                    """,
+                    (target_workbook_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                """
+                UPDATE workbooks
+                SET total_rows = ?
+                WHERE id = ?
+                """,
+                (target_total_rows, target_workbook_id),
+            )
+            connection.execute("DELETE FROM workbooks WHERE id = ?", (source_workbook_id,))
+
+            moved_sheets = len(source_imports)
+            moved_rows = sum(int(row["total_rows"]) for row in source_imports)
+            return moved_sheets, moved_rows, target_total_rows
+
     def list_workbooks(self) -> list[ImportedWorkbook]:
         with connect(self._database_path) as connection:
             rows = connection.execute(
@@ -213,6 +337,32 @@ class SqliteGuestRepository:
             ).fetchall()
 
         return [self._to_workbook(row) for row in rows]
+
+    def _unique_merged_sheet_name(
+        self,
+        sheet_name: str,
+        existing_sheet_names: set[str],
+        source_display_name: str,
+    ) -> str:
+        if sheet_name not in existing_sheet_names:
+            return sheet_name
+
+        source_label = self._compact_source_label(source_display_name)
+        base_name = f"{sheet_name} - {source_label}" if source_label else f"{sheet_name} - origem"
+        candidate = base_name
+        counter = 2
+        while candidate in existing_sheet_names:
+            candidate = f"{base_name} {counter}"
+            counter += 1
+        return candidate
+
+    def _compact_source_label(self, display_name: str) -> str:
+        label = Path(display_name.strip()).stem.strip()
+        if not label:
+            return ""
+        if len(label) <= 32:
+            return label
+        return label[:29].rstrip() + "..."
 
     def get_automatic_sheet_name(self) -> str:
         with connect(self._database_path) as connection:

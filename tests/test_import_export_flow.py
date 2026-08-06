@@ -8,6 +8,7 @@ from app.application.use_cases.export_selected_guests import ExportSelectedGuest
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase
 from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
+from app.application.use_cases.merge_workbooks import MergeWorkbooksUseCase
 from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
@@ -17,6 +18,82 @@ from app.infrastructure.spreadsheet.openpyxl_reader import OpenpyxlSpreadsheetRe
 
 
 class ImportExportFlowTest(unittest.TestCase):
+    def test_merges_workbooks_and_preserves_tabs_selection_and_automatic_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            first_spreadsheet = temp_path / "lista_a.xlsx"
+            second_spreadsheet = temp_path / "lista_b.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            self._create_multi_sheet_contact_workbook(first_spreadsheet, ["Amigos", "Arquitetos"])
+            self._create_multi_sheet_contact_workbook(second_spreadsheet, ["Amigos", "Politicos"])
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_use_case = ImportSpreadsheetUseCase(repository, OpenpyxlSpreadsheetReader())
+
+            first_import = import_use_case.execute_workbook(str(first_spreadsheet))
+            second_import = import_use_case.execute_workbook(str(second_spreadsheet))
+
+            second_amigos_page = ListGuestsUseCase(repository).execute(
+                import_id=second_import.imported_sheets[0].import_id,
+                workbook_id=second_import.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            UpdateGuestSelectionUseCase(repository).set_guest_selected(
+                guest_id=second_amigos_page.rows[0].id,
+                selected=True,
+            )
+
+            result = MergeWorkbooksUseCase(repository).execute(
+                source_workbook_id=second_import.workbook_id,
+                target_workbook_id=first_import.workbook_id,
+            )
+
+            self.assertEqual(result.moved_sheets, 2)
+            self.assertEqual(result.moved_rows, 2)
+            self.assertEqual(result.target_total_rows, 4)
+
+            workbooks = repository.list_workbooks()
+            self.assertEqual(len(workbooks), 1)
+            self.assertEqual(workbooks[0].id, first_import.workbook_id)
+            self.assertEqual(workbooks[0].total_rows, 4)
+
+            merged_imports = repository.list_imports(first_import.workbook_id)
+            merged_sheet_names = [imported_sheet.sheet_name for imported_sheet in merged_imports]
+            self.assertEqual(len(merged_imports), 4)
+            self.assertIn("Amigos", merged_sheet_names)
+            self.assertIn("Arquitetos", merged_sheet_names)
+            self.assertIn("Politicos", merged_sheet_names)
+            self.assertTrue(
+                any(sheet_name.startswith("Amigos - lista_b") for sheet_name in merged_sheet_names)
+            )
+
+            moved_import = repository.get_import(second_import.imported_sheets[0].import_id)
+            self.assertIsNotNone(moved_import)
+            self.assertEqual(moved_import.workbook_id, first_import.workbook_id)
+
+            automatic_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=first_import.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            self.assertEqual(automatic_page.total_rows, 1)
+            self.assertTrue(automatic_page.rows[0].data["Lista"].startswith("Amigos - lista_b"))
+            self.assertEqual(automatic_page.rows[0].data["Nome"], "Amigos 1")
+
+            old_source_automatic_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=second_import.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            self.assertEqual(old_source_automatic_page.total_rows, 0)
+
     def test_detects_duplicates_across_workbooks_by_normalized_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -517,6 +594,16 @@ class ImportExportFlowTest(unittest.TestCase):
         worksheet.title = sheet_name
         worksheet.append(["Nome", "Telefone"])
         worksheet.append([name, phone])
+        workbook.save(path)
+        workbook.close()
+
+    def _create_multi_sheet_contact_workbook(self, path: Path, sheet_names: list[str]) -> None:
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        for sheet_name in sheet_names:
+            worksheet = workbook.create_sheet(sheet_name)
+            worksheet.append(["Nome", "Telefone"])
+            worksheet.append([f"{sheet_name} 1", "(00) 90000-0000"])
         workbook.save(path)
         workbook.close()
 

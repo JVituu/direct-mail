@@ -23,6 +23,13 @@ class GuestRepository(Protocol):
     def delete_workbook(self, workbook_id: int) -> None:
         raise NotImplementedError
 
+    def merge_workbooks(
+        self,
+        source_workbook_id: int,
+        target_workbook_id: int,
+    ) -> tuple[int, int, int]:
+        raise NotImplementedError
+
     def list_workbooks(self) -> list[ImportedWorkbook]:
         raise NotImplementedError
 

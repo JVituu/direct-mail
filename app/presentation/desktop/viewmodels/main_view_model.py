@@ -1,4 +1,5 @@
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from app.application.dtos.guest_dto import (
     GuestPageDTO,
@@ -9,6 +10,7 @@ from app.application.dtos.guest_dto import (
     WorkbookImportResultDTO,
     WorkbookSummaryDTO,
 )
+from app.application.use_cases.consolidate_imported_data import ConsolidateImportedDataUseCase
 from app.application.use_cases.delete_workbook import DeleteWorkbookUseCase
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
@@ -41,6 +43,7 @@ class MainViewModel:
         self._list_workbooks = ListWorkbooksUseCase(guest_repository)
         self._list_imports = ListImportsUseCase(guest_repository)
         self._list_guests = ListGuestsUseCase(guest_repository)
+        self._consolidate_imported_data = ConsolidateImportedDataUseCase(guest_repository)
         self._update_guest_data = UpdateGuestDataUseCase(guest_repository)
         self._update_selection = UpdateGuestSelectionUseCase(guest_repository)
         self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
@@ -77,10 +80,17 @@ class MainViewModel:
         sheet_names: list[str] | None = None,
         progress_callback: Callable[[str, int], None] | None = None,
     ) -> WorkbookImportResultDTO:
-        return self._import_spreadsheet.execute_workbook(
+        result = self._import_spreadsheet.execute_workbook(
             file_path=file_path,
             sheet_names=sheet_names,
             progress_callback=progress_callback,
+        )
+        consolidation = self._consolidate_imported_data.execute()
+        return replace(
+            result,
+            workbook_id=consolidation.workbook_id or result.workbook_id,
+            total_rows=consolidation.total_rows or result.total_rows,
+            removed_duplicates=consolidation.removed_duplicates,
         )
 
     def list_workbooks(self) -> list[WorkbookSummaryDTO]:
@@ -171,7 +181,17 @@ class MainViewModel:
         import_id: int | None,
         output_path: str,
         workbook_id: int | None = None,
+        export_mode: str = "complete",
+        export_scope: str = "final",
+        export_format: str = "xlsx",
     ) -> ImportResultDTO:
-        return self._export_selected.execute(import_id, output_path, workbook_id)
+        return self._export_selected.execute(
+            import_id,
+            output_path,
+            workbook_id,
+            export_mode,
+            export_scope,
+            export_format,
+        )
 
 

@@ -30,6 +30,9 @@ class GuestRepository(Protocol):
     ) -> tuple[int, int, int]:
         raise NotImplementedError
 
+    def deduplicate_guests(self, workbook_id: int | None = None) -> int:
+        raise NotImplementedError
+
     def list_workbooks(self) -> list[ImportedWorkbook]:
         raise NotImplementedError
 
@@ -153,6 +156,13 @@ class GuestRepository(Protocol):
         raise NotImplementedError
 
     def iter_selected_guests(
+        self,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+    ) -> Iterable[GuestRecord]:
+        raise NotImplementedError
+
+    def iter_guests(
         self,
         import_id: int | None = None,
         workbook_id: int | None = None,

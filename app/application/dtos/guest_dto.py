@@ -41,6 +41,7 @@ class WorkbookImportResultDTO:
     total_rows: int
     imported_sheets: tuple[ImportResultDTO, ...]
     skipped_sheets: tuple[str, ...]
+    removed_duplicates: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,14 @@ class WorkbookMergeResultDTO:
     moved_sheets: int
     moved_rows: int
     target_total_rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkbookConsolidationResultDTO:
+    workbook_id: int
+    moved_sheets: int
+    removed_duplicates: int
+    total_rows: int
 
 
 @dataclass(slots=True)

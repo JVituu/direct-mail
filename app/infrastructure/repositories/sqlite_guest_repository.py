@@ -33,6 +33,8 @@ NAME_HEADER_WORDS = {
 }
 EMAIL_HEADER_WORDS = {"email", "e-mail", "mail"}
 PHONE_HEADER_WORDS = {"telefone", "phone", "celular", "whatsapp", "fone", "tel"}
+CEP_HEADER_WORDS = {"cep", "codigo postal", "postal code", "zip"}
+ADDRESS_HEADER_WORDS = {"endereco", "address", "logradouro", "rua", "avenida", "av"}
 NAME_PARTICLES = {"da", "de", "do", "das", "dos", "e"}
 WEAK_NAME_KEYS = {
     "acompanhante",
@@ -325,6 +327,99 @@ class SqliteGuestRepository:
             moved_sheets = len(source_imports)
             moved_rows = sum(int(row["total_rows"]) for row in source_imports)
             return moved_sheets, moved_rows, target_total_rows
+
+    def deduplicate_guests(self, workbook_id: int | None = None) -> int:
+        query = """
+            SELECT
+                guests.id,
+                guests.import_id,
+                imports.workbook_id,
+                guests.row_number,
+                guests.data_json,
+                guests.selected,
+                identities.name_key,
+                identities.phone_key,
+                identities.email_key
+            FROM guests
+            JOIN imports ON imports.id = guests.import_id
+            JOIN guest_identities identities ON identities.guest_id = guests.id
+            WHERE imports.is_selectable = 1
+        """
+        params: list[object] = []
+        if workbook_id is not None:
+            query += " AND imports.workbook_id = ?"
+            params.append(workbook_id)
+        query += " ORDER BY imports.workbook_id, imports.id, guests.row_number, guests.id"
+
+        with connect(self._database_path) as connection:
+            rows = connection.execute(query, params).fetchall()
+            duplicate_groups = self._duplicate_guest_groups(rows)
+
+            removed_total = 0
+            affected_import_ids: set[int] = set()
+            affected_workbook_ids: set[int] = set()
+
+            for group in duplicate_groups:
+                winner = self._duplicate_group_winner(group)
+                winner_id = int(winner["id"])
+                winner_data = self._merge_duplicate_group_data(group, winner_id)
+                winner_selected = any(bool(row["selected"]) for row in group)
+                removed_ids = [int(row["id"]) for row in group if int(row["id"]) != winner_id]
+                if not removed_ids:
+                    continue
+
+                affected_import_ids.update(int(row["import_id"]) for row in group)
+                affected_workbook_ids.update(int(row["workbook_id"]) for row in group)
+
+                connection.execute(
+                    """
+                    UPDATE guests
+                    SET data_json = ?, selected = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        json.dumps(winner_data, ensure_ascii=False),
+                        1 if winner_selected else int(winner["selected"]),
+                        winner_id,
+                    ),
+                )
+
+                placeholders = ", ".join("?" for _ in removed_ids)
+                connection.execute(
+                    f"DELETE FROM automatic_guests WHERE source_guest_id IN ({placeholders})",
+                    removed_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM guests WHERE id IN ({placeholders})",
+                    removed_ids,
+                )
+                removed_total += len(removed_ids)
+
+                if winner_selected:
+                    connection.execute(
+                        "DELETE FROM automatic_guests WHERE source_guest_id = ?",
+                        (winner_id,),
+                    )
+                    self._insert_automatic_guest_copy(connection, winner_id)
+                    connection.execute(
+                        """
+                        UPDATE automatic_guests
+                        SET columns_json = ?, data_json = ?
+                        WHERE source_guest_id = ?
+                        """,
+                        (
+                            json.dumps(list(winner_data.keys()), ensure_ascii=False),
+                            json.dumps(winner_data, ensure_ascii=False),
+                            winner_id,
+                        ),
+                    )
+                self._upsert_guest_identity(connection, winner_id)
+
+            if removed_total:
+                self._recalculate_import_totals(connection, affected_import_ids)
+                self._recalculate_workbook_totals(connection, affected_workbook_ids)
+
+            return removed_total
 
     def list_workbooks(self) -> list[ImportedWorkbook]:
         with connect(self._database_path) as connection:
@@ -840,40 +935,40 @@ class SqliteGuestRepository:
     def update_guest_data(self, guest_id: int, column_name: str, value: str) -> None:
         with connect(self._database_path) as connection:
             row = connection.execute(
-                "SELECT data_json FROM guests WHERE id = ?",
+                "SELECT import_id, data_json FROM guests WHERE id = ?",
                 (guest_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("Registro não encontrado.")
 
             data = json.loads(row["data_json"])
-            if column_name not in data:
-                raise ValueError("Coluna não encontrada neste registro.")
-
             data[column_name] = value
             connection.execute(
                 "UPDATE guests SET data_json = ? WHERE id = ?",
                 (json.dumps(data, ensure_ascii=False), guest_id),
             )
+            self._append_import_column(connection, int(row["import_id"]), column_name)
             self._upsert_guest_identity(connection, guest_id)
 
     def update_automatic_guest_data(self, source_guest_id: int, column_name: str, value: str) -> None:
         with connect(self._database_path) as connection:
             row = connection.execute(
-                "SELECT data_json FROM automatic_guests WHERE source_guest_id = ?",
+                "SELECT columns_json, data_json FROM automatic_guests WHERE source_guest_id = ?",
                 (source_guest_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("Registro não encontrado na Planilha automática.")
 
             data = json.loads(row["data_json"])
-            if column_name not in data:
-                raise ValueError("Coluna não encontrada neste registro.")
-
             data[column_name] = value
+            columns = self._append_column_to_json(row["columns_json"], column_name)
             connection.execute(
-                "UPDATE automatic_guests SET data_json = ? WHERE source_guest_id = ?",
-                (json.dumps(data, ensure_ascii=False), source_guest_id),
+                """
+                UPDATE automatic_guests
+                SET columns_json = ?, data_json = ?
+                WHERE source_guest_id = ?
+                """,
+                (columns, json.dumps(data, ensure_ascii=False), source_guest_id),
             )
 
     def set_guests_selected(
@@ -949,6 +1044,34 @@ class SqliteGuestRepository:
             FROM guests
             JOIN imports ON imports.id = guests.import_id
             WHERE guests.selected = 1
+        """
+        params: list[object] = []
+        query, params = self._apply_guest_filters(query, params, import_id, workbook_id)
+        query += " ORDER BY imports.id, guests.row_number"
+
+        with connect(self._database_path) as connection:
+            rows = connection.execute(query, params)
+            for row in rows:
+                yield self._to_guest(row)
+
+    def iter_guests(
+        self,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+    ) -> Iterable[GuestRecord]:
+        query = """
+            SELECT
+                guests.id,
+                guests.import_id,
+                imports.sheet_name,
+                imports.is_selectable,
+                guests.row_number,
+                guests.verification_code,
+                guests.data_json,
+                guests.selected
+            FROM guests
+            JOIN imports ON imports.id = guests.import_id
+            WHERE 1 = 1
         """
         params: list[object] = []
         query, params = self._apply_guest_filters(query, params, import_id, workbook_id)
@@ -1338,6 +1461,183 @@ class SqliteGuestRepository:
             list(clean_keys),
         ).fetchall()
         return {str(row["identity_key"]): int(row["total"]) for row in rows}
+
+    def _duplicate_guest_groups(self, rows: Sequence[object]) -> list[list[object]]:
+        if not rows:
+            return []
+
+        parent = {int(row["id"]): int(row["id"]) for row in rows}
+
+        def find(guest_id: int) -> int:
+            while parent[guest_id] != guest_id:
+                parent[guest_id] = parent[parent[guest_id]]
+                guest_id = parent[guest_id]
+            return guest_id
+
+        def union(left_id: int, right_id: int) -> None:
+            left_root = find(left_id)
+            right_root = find(right_id)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for identity_column in ("email_key", "phone_key", "name_key"):
+            seen: dict[str, int] = {}
+            for row in rows:
+                identity_key = str(row[identity_column]).strip()
+                if not identity_key:
+                    continue
+                guest_id = int(row["id"])
+                if identity_key in seen:
+                    union(seen[identity_key], guest_id)
+                else:
+                    seen[identity_key] = guest_id
+
+        grouped_rows: dict[int, list[object]] = {}
+        for row in rows:
+            grouped_rows.setdefault(find(int(row["id"])), []).append(row)
+        return [group for group in grouped_rows.values() if len(group) > 1]
+
+    def _duplicate_group_winner(self, rows: Sequence[object]) -> object:
+        return max(
+            rows,
+            key=lambda row: (
+                self._duplicate_completeness_score(json.loads(row["data_json"])),
+                -int(row["workbook_id"]),
+                -int(row["import_id"]),
+                -int(row["row_number"]),
+                -int(row["id"]),
+            ),
+        )
+
+    def _duplicate_completeness_score(self, data: dict[str, str]) -> int:
+        score = 0
+        for value in data.values():
+            for item in self._split_merged_values(str(value)):
+                score += 8
+                score += min(len(item), 120) // 12
+
+        if self._find_value_by_headers(data, NAME_HEADER_WORDS):
+            score += 20
+        if self._find_value_by_headers(data, EMAIL_HEADER_WORDS) or self._find_email_in_values(data):
+            score += 50
+        if self._find_value_by_headers(data, PHONE_HEADER_WORDS):
+            score += 40
+        if self._find_value_by_headers(data, CEP_HEADER_WORDS):
+            score += 18
+        if self._find_value_by_headers(data, ADDRESS_HEADER_WORDS):
+            score += 18
+        return score
+
+    def _merge_duplicate_group_data(
+        self,
+        rows: Sequence[object],
+        winner_id: int,
+    ) -> dict[str, str]:
+        ordered_rows = sorted(
+            rows,
+            key=lambda row: 0 if int(row["id"]) == winner_id else 1,
+        )
+        merged: dict[str, str] = {}
+        for row in ordered_rows:
+            data = json.loads(row["data_json"])
+            for column_name, value in data.items():
+                self._append_merged_value(merged, str(column_name), str(value))
+        return merged
+
+    def _append_merged_value(self, data: dict[str, str], column_name: str, value: str) -> None:
+        values = self._split_merged_values(value)
+        if not values:
+            return
+
+        current_values = self._split_merged_values(data.get(column_name, ""))
+        normalized_column = self._normalize_match_text(column_name)
+        normalized_name_words = {self._normalize_match_text(word) for word in NAME_HEADER_WORDS}
+        if current_values and any(word and word in normalized_column for word in normalized_name_words):
+            return
+
+        for new_value in values:
+            if any(self._same_merged_value(existing_value, new_value) for existing_value in current_values):
+                continue
+            current_values.append(new_value)
+        data[column_name] = "\n".join(current_values)
+
+    def _append_import_column(self, connection: object, import_id: int, column_name: str) -> None:
+        row = connection.execute(
+            "SELECT columns_json FROM imports WHERE id = ?",
+            (import_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        columns_json = self._append_column_to_json(row["columns_json"], column_name)
+        connection.execute(
+            "UPDATE imports SET columns_json = ? WHERE id = ?",
+            (columns_json, import_id),
+        )
+
+    def _append_column_to_json(self, columns_json: object, column_name: str) -> str:
+        try:
+            columns = json.loads(str(columns_json))
+        except (TypeError, json.JSONDecodeError):
+            columns = []
+
+        clean_column_name = str(column_name).strip()
+        output_columns = [str(column).strip() for column in columns if str(column).strip()]
+        if clean_column_name and clean_column_name not in output_columns:
+            output_columns.append(clean_column_name)
+        return json.dumps(output_columns, ensure_ascii=False)
+
+    def _split_merged_values(self, value: str) -> list[str]:
+        return [
+            item.strip()
+            for item in re.split(r"[\n;]+", str(value))
+            if item.strip()
+        ]
+
+    def _same_merged_value(self, left: str, right: str) -> bool:
+        left_value = str(left).strip()
+        right_value = str(right).strip()
+        if not left_value or not right_value:
+            return left_value == right_value
+        if "@" in left_value or "@" in right_value:
+            return left_value.casefold() == right_value.casefold()
+
+        left_digits = re.sub(r"\D+", "", left_value)
+        right_digits = re.sub(r"\D+", "", right_value)
+        if left_digits and right_digits:
+            return left_digits == right_digits
+        return self._normalize_match_text(left_value) == self._normalize_match_text(right_value)
+
+    def _recalculate_import_totals(self, connection: object, import_ids: set[int]) -> None:
+        for import_id in import_ids:
+            total_rows = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM guests WHERE import_id = ?",
+                    (import_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "UPDATE imports SET total_rows = ? WHERE id = ?",
+                (total_rows, import_id),
+            )
+
+    def _recalculate_workbook_totals(self, connection: object, workbook_ids: set[int]) -> None:
+        for workbook_id in workbook_ids:
+            total_rows = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM guests
+                    JOIN imports ON imports.id = guests.import_id
+                    WHERE imports.workbook_id = ?
+                    """,
+                    (workbook_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "UPDATE workbooks SET total_rows = ? WHERE id = ?",
+                (total_rows, workbook_id),
+            )
 
     def _migrate_schema(self, connection: object) -> None:
         import_columns = self._table_columns(connection, "imports")

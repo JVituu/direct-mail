@@ -8,6 +8,7 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QComboBox,
     QPushButton,
+    QRadioButton,
     QProgressBar,
     QSizePolicy,
     QStyle,
@@ -38,7 +40,12 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from app.application.dtos.guest_dto import GuestRowDTO, ImportSummaryDTO, WorkbookImportResultDTO
+from app.application.dtos.guest_dto import (
+    GuestRowDTO,
+    ImportSummaryDTO,
+    WorkbookImportResultDTO,
+    WorkbookSummaryDTO,
+)
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
 from app.presentation.desktop.widgets.guest_table_model import GuestTableModel
 
@@ -136,6 +143,10 @@ class SendCornerButton(QPushButton):
 
 
 class CircleCheckDelegate(QStyledItemDelegate):
+    @staticmethod
+    def _is_checked(check_state: object) -> bool:
+        return check_state == Qt.CheckState.Checked or check_state == Qt.CheckState.Checked.value
+
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         check_state = index.data(Qt.ItemDataRole.CheckStateRole)
         if check_state is None:
@@ -161,7 +172,7 @@ class CircleCheckDelegate(QStyledItemDelegate):
         painter.setBrush(QBrush(QColor("#ffffff")))
         painter.drawRoundedRect(box_rect, 4, 4)
 
-        if check_state == Qt.CheckState.Checked:
+        if self._is_checked(check_state):
             dot_size = 8
             dot_x = box_x + (box_size - dot_size) // 2
             dot_y = box_y + (box_size - dot_size) // 2
@@ -183,7 +194,7 @@ class CircleCheckDelegate(QStyledItemDelegate):
             current_state = index.data(Qt.ItemDataRole.CheckStateRole)
             next_state = (
                 Qt.CheckState.Unchecked
-                if current_state == Qt.CheckState.Checked
+                if self._is_checked(current_state)
                 else Qt.CheckState.Checked
             )
             return bool(model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole))
@@ -191,7 +202,7 @@ class CircleCheckDelegate(QStyledItemDelegate):
             current_state = index.data(Qt.ItemDataRole.CheckStateRole)
             next_state = (
                 Qt.CheckState.Unchecked
-                if current_state == Qt.CheckState.Checked
+                if self._is_checked(current_state)
                 else Qt.CheckState.Checked
             )
             return bool(model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole))
@@ -215,6 +226,7 @@ class MainWindow(QMainWindow):
         self._imports: list[ImportSummaryDTO] = []
         self._available_columns: tuple[str, ...] = tuple()
         self._visible_columns_by_context: dict[str, set[str]] = {}
+        self._duplicates_count_value = 0
         self._marked_guest_ids: set[int] = set()
         self._table_model: GuestTableModel | None = None
         self._import_thread: QThread | None = None
@@ -259,21 +271,25 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("Mala Direta -  Instituto Ricardo Brennand")
         title.setObjectName("Title")
-        subtitle = QLabel("Arquivos Excel viram abas; cada sheet aparece como uma planilha interna.")
+        subtitle = QLabel("Arquivos Excel são unificados automaticamente; selecione convidados e exporte a lista final.")
         subtitle.setObjectName("Subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         layout.addLayout(title_box, 1)
 
-        self.import_button = QPushButton("Importar Excel")
+        self.import_button = QPushButton("Importar planilha")
         self.import_button.setObjectName("PrimaryButton")
         self.import_button.clicked.connect(self._choose_file)
         layout.addWidget(self.import_button)
 
-        self.export_button = QPushButton("Exportar Excel")
+        self.export_button = QPushButton("Exportar lista final")
         self.export_button.setObjectName("SuccessButton")
         self.export_button.clicked.connect(self._export_selected)
         layout.addWidget(self.export_button)
+
+        self.options_button = QPushButton("Opções")
+        self.options_button.clicked.connect(self._show_options_menu)
+        layout.addWidget(self.options_button)
 
         return header
 
@@ -284,7 +300,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(10)
 
-        label = QLabel("Arquivos")
+        label = QLabel("Planilha")
         label.setObjectName("SmallLabel")
         layout.addWidget(label)
 
@@ -296,12 +312,6 @@ class MainWindow(QMainWindow):
         self.workbook_tabs.customContextMenuRequested.connect(self._show_workbook_context_menu)
         layout.addWidget(self.workbook_tabs, 1)
 
-        self.duplicates_button = QPushButton("Duplicados")
-        self.duplicates_button.setToolTip("Ver possíveis registros duplicados")
-        self.duplicates_button.setVisible(False)
-        self.duplicates_button.clicked.connect(self._open_duplicates_view)
-        layout.addWidget(self.duplicates_button)
-
         return frame
 
     def _build_filters_and_actions(self) -> QFrame:
@@ -311,32 +321,24 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(10)
 
-        self.filter_button = QPushButton("Filtros")
-        self.filter_button.clicked.connect(self._show_column_filter_menu)
-        layout.addWidget(self.filter_button)
-
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar por nome, telefone, endereço, obra ou qualquer coluna")
+        self.search_input.setPlaceholderText("Buscar na lista unificada")
         self.search_input.returnPressed.connect(self._apply_search)
         self.search_input.textChanged.connect(self._schedule_live_search)
         self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.search_input, 1)
 
-        self.search_button = QPushButton("Buscar")
-        self.search_button.clicked.connect(self._apply_search)
-        layout.addWidget(self.search_button)
-
-        self.clear_search_button = QPushButton("Limpar")
+        self.clear_search_button = QPushButton("Limpar busca")
         self.clear_search_button.clicked.connect(self._clear_search)
         layout.addWidget(self.clear_search_button)
 
-        self.select_page_button = QPushButton("Selecionar página")
+        self.select_page_button = QPushButton("Marcar página")
         self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
-        layout.addWidget(self.select_page_button)
+        self.select_page_button.setVisible(False)
 
-        self.clear_page_button = QPushButton("Limpar página")
+        self.clear_page_button = QPushButton("Desmarcar página")
         self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
-        layout.addWidget(self.clear_page_button)
+        self.clear_page_button.setVisible(False)
 
         return frame
 
@@ -348,7 +350,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
 
-        label = QLabel("Abas")
+        label = QLabel("Lista")
         label.setObjectName("SmallLabel")
         layout.addWidget(label)
 
@@ -596,17 +598,24 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 100)
-        self.status_label.setText(f"{result.total_rows} linhas importadas.")
+        self.status_label.setText(f"{result.total_rows} linhas na Lista unificada.")
         self._load_workbooks(preferred_workbook_id=result.workbook_id)
 
         selectable_count = sum(1 for sheet in result.imported_sheets if sheet.is_selectable)
+        duplicate_message = (
+            f"\n{result.removed_duplicates} duplicidades removidas automaticamente."
+            if result.removed_duplicates
+            else ""
+        )
         QMessageBox.information(
             self,
             "Importação concluída",
             (
-                f"Arquivo '{result.file_name}' importado.\n"
+                f"Arquivo '{result.file_name}' importado e unificado.\n"
                 f"{len(result.imported_sheets)} abas carregadas, "
-                f"{selectable_count} listas selecionáveis."
+                f"{selectable_count} listas selecionáveis.\n"
+                f"Lista unificada com {result.total_rows} linhas."
+                f"{duplicate_message}"
             ),
         )
 
@@ -628,7 +637,7 @@ class MainWindow(QMainWindow):
         self.workbook_tabs.blockSignals(True)
         self._clear_tab_bar(self.workbook_tabs)
         for workbook in workbooks:
-            self.workbook_tabs.addTab(f"{workbook.display_name} ({workbook.total_rows})")
+            self.workbook_tabs.addTab(self._workbook_tab_text(workbook, len(workbooks)))
             self.workbook_tabs.setTabData(
                 self.workbook_tabs.count() - 1,
                 {"kind": "workbook", "workbook_id": workbook.id},
@@ -664,6 +673,11 @@ class MainWindow(QMainWindow):
                     break
         self.workbook_tabs.setCurrentIndex(target_index)
         self._on_workbook_changed(target_index)
+
+    def _workbook_tab_text(self, workbook: WorkbookSummaryDTO, workbook_count: int) -> str:
+        if workbook_count == 1:
+            return f"Lista unificada ({workbook.total_rows})"
+        return f"{workbook.display_name} ({workbook.total_rows})"
 
     def _on_workbook_changed(self, index: int) -> None:
         tab_data = self.workbook_tabs.tabData(index) if index >= 0 else None
@@ -702,31 +716,28 @@ class MainWindow(QMainWindow):
             self._load_table()
             return
 
-        self.sheet_frame.setVisible(True)
-        previous_data = self.sheet_tabs.tabData(self.sheet_tabs.currentIndex())
+        self.sheet_frame.setVisible(False)
         self.sheet_tabs.blockSignals(True)
         self._clear_tab_bar(self.sheet_tabs)
 
         self._imports = self._view_model.list_imports(self._current_workbook_id) if self._current_workbook_id else []
-        for imported_sheet in self._imports:
-            label = imported_sheet.sheet_name
-            if imported_sheet.is_selectable:
-                label = f"{label} ({imported_sheet.total_rows})"
-            else:
-                label = f"{label} · visualização"
-            self.sheet_tabs.addTab(label)
+        selectable_imports = [imported_sheet for imported_sheet in self._imports if imported_sheet.is_selectable]
+        total_rows = sum(imported_sheet.total_rows for imported_sheet in selectable_imports)
+        if not total_rows:
+            total_rows = sum(imported_sheet.total_rows for imported_sheet in self._imports)
+        if self._imports:
+            self.sheet_tabs.addTab(f"Lista unificada ({total_rows})")
             self.sheet_tabs.setTabData(
                 self.sheet_tabs.count() - 1,
                 {
-                    "kind": "sheet",
-                    "import_id": imported_sheet.id,
-                    "selectable": imported_sheet.is_selectable,
+                    "kind": "unified",
+                    "import_id": None,
+                    "selectable": bool(selectable_imports),
                 },
             )
 
         self.sheet_tabs.blockSignals(False)
-        target_index = self._find_matching_sheet_tab(previous_data)
-        self.sheet_tabs.setCurrentIndex(target_index if target_index >= 0 else (0 if self.sheet_tabs.count() else -1))
+        self.sheet_tabs.setCurrentIndex(0 if self.sheet_tabs.count() else -1)
         self._on_sheet_changed(self.sheet_tabs.currentIndex())
 
     def _clear_tab_bar(self, tab_bar: QTabBar) -> None:
@@ -742,6 +753,50 @@ class MainWindow(QMainWindow):
                 return index
         return -1
 
+    def _show_options_menu(self) -> None:
+        menu = QMenu(self)
+
+        has_workspace = (
+            self._current_workbook_id is not None
+            or self._automatic_mode
+            or self._duplicates_mode
+        )
+        can_select = (
+            self._current_workbook_id is not None
+            and self._current_sheet_selectable
+            and not self._automatic_mode
+            and not self._duplicates_mode
+            and self._total_rows > 0
+        )
+        can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
+
+        filter_action = menu.addAction("Filtrar colunas")
+        filter_action.setEnabled(has_workspace and bool(self._available_columns))
+
+        duplicates_count = self._duplicates_count_value
+        duplicate_action = menu.addAction(
+            f"Possíveis repetidos ({duplicates_count})"
+            if duplicates_count
+            else "Possíveis repetidos"
+        )
+        duplicate_action.setEnabled(duplicates_count > 0)
+
+        menu.addSeparator()
+        mark_page_action = menu.addAction("Marcar página atual")
+        mark_page_action.setEnabled(can_select)
+        clear_page_action = menu.addAction("Desmarcar página atual")
+        clear_page_action.setEnabled(can_clear_page)
+
+        selected_action = menu.exec(self.options_button.mapToGlobal(self.options_button.rect().bottomLeft()))
+        if selected_action == filter_action:
+            self._show_column_filter_menu()
+        elif selected_action == duplicate_action:
+            self._open_duplicates_view()
+        elif selected_action == mark_page_action:
+            self._set_page_selection(True)
+        elif selected_action == clear_page_action:
+            self._set_page_selection(False)
+
     def _show_filter_menu(self) -> None:
         if self._automatic_mode or self._duplicates_mode or not self._imports:
             return
@@ -756,7 +811,7 @@ class MainWindow(QMainWindow):
             action.setChecked(index == self.sheet_tabs.currentIndex())
             action.setData(index)
 
-        selected_action = menu.exec(self.filter_button.mapToGlobal(self.filter_button.rect().bottomLeft()))
+        selected_action = menu.exec(self.options_button.mapToGlobal(self.options_button.rect().bottomLeft()))
         if selected_action is None:
             return
 
@@ -814,7 +869,7 @@ class MainWindow(QMainWindow):
         widget_action = QWidgetAction(menu)
         widget_action.setDefaultWidget(container)
         menu.addAction(widget_action)
-        menu.exec(self.filter_button.mapToGlobal(self.filter_button.rect().bottomLeft()))
+        menu.exec(self.options_button.mapToGlobal(self.options_button.rect().bottomLeft()))
 
     def _apply_column_filter_from_list(self, column_list: QListWidget, menu: QMenu) -> None:
         selected_columns = {
@@ -882,9 +937,9 @@ class MainWindow(QMainWindow):
 
     def _update_filter_button_text(self, visible_columns: tuple[str, ...]) -> None:
         if not self._available_columns or len(visible_columns) == len(self._available_columns):
-            self.filter_button.setText("Filtros")
+            self.options_button.setText("Opções")
             return
-        self.filter_button.setText(f"Filtros ({len(visible_columns)}/{len(self._available_columns)})")
+        self.options_button.setText(f"Opções ({len(visible_columns)}/{len(self._available_columns)})")
 
     def _automatic_selected_count(self) -> int:
         try:
@@ -912,9 +967,7 @@ class MainWindow(QMainWindow):
 
     def _update_duplicates_button(self, duplicates_count: int | None = None) -> None:
         count = self._duplicates_count() if duplicates_count is None else duplicates_count
-        self.duplicates_button.setVisible(count > 0)
-        self.duplicates_button.setText(f"Duplicados ({count})" if count > 0 else "Duplicados")
-        self.duplicates_button.setEnabled(count > 0)
+        self._duplicates_count_value = count
 
     def _open_duplicates_view(self) -> None:
         if self._duplicates_count() <= 0:
@@ -1100,20 +1153,23 @@ class MainWindow(QMainWindow):
     def _update_page_label(self) -> None:
         if self._total_rows == 0:
             if self._automatic_mode:
-                message = "Nenhum convidado selecionado"
+                message = "Lista final vazia"
             elif self._duplicates_mode:
-                message = "Nenhum duplicado encontrado"
+                message = "Nenhum repetido encontrado"
             else:
-                message = "Nenhum registro encontrado"
+                message = "Nenhum registro na lista"
             self.page_label.setText(message)
             return
 
         total_pages = max(ceil(self._total_rows / max(self._page_size, 1)), 1)
-        suffix = "na planilha automática" if self._automatic_mode else f"{self._selected_rows} selecionados"
+        if self._automatic_mode:
+            context = f"Lista final: {self._total_rows} convidados"
+        else:
+            context = f"Lista unificada: {self._total_rows} registros | Lista final: {self._selected_rows}"
         if self._duplicates_mode:
-            suffix = "possíveis duplicados"
+            context = f"Possíveis repetidos: {self._total_rows} registros"
         self.page_label.setText(
-            f"Página {self._current_page + 1} de {total_pages} | {self._total_rows} registros | {suffix}"
+            f"{context} | Página {self._current_page + 1} de {total_pages}"
         )
 
     def _normalize_page(self, page: int, total_rows: int, page_size: int) -> int:
@@ -1240,6 +1296,9 @@ class MainWindow(QMainWindow):
         for group_id, group_label in group_labels.items():
             review_group_filter.addItem(group_label, f"group:{group_id}")
         filter_layout.addWidget(review_group_filter)
+
+        select_all_checkbox = QCheckBox("Selecionar todos")
+        filter_layout.addWidget(select_all_checkbox)
         layout.addLayout(filter_layout)
 
         table = QTableWidget(len(review_rows), 12)
@@ -1340,8 +1399,35 @@ class MainWindow(QMainWindow):
                     matches_filter = True
                 table.setRowHidden(table_row, not (matches_search and matches_filter))
 
+        def set_all_review_rows_checked(checked: bool) -> None:
+            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            table.blockSignals(True)
+            for table_row in range(table.rowCount()):
+                item = table.item(table_row, 0)
+                if item is None:
+                    continue
+                item.setCheckState(state)
+            table.blockSignals(False)
+            table.viewport().update()
+            update_select_all_checkbox()
+
+        def update_select_all_checkbox() -> None:
+            total_rows = table.rowCount()
+            checked_rows = 0
+            for table_row in range(total_rows):
+                item = table.item(table_row, 0)
+                if item is not None and item.checkState() == Qt.CheckState.Checked:
+                    checked_rows += 1
+
+            select_all_checkbox.blockSignals(True)
+            select_all_checkbox.setChecked(total_rows > 0 and checked_rows == total_rows)
+            select_all_checkbox.blockSignals(False)
+
         review_filter_input.textChanged.connect(apply_review_filters)
         review_group_filter.currentIndexChanged.connect(apply_review_filters)
+        select_all_checkbox.toggled.connect(set_all_review_rows_checked)
+        table.itemChanged.connect(lambda _item: update_select_all_checkbox())
+        update_select_all_checkbox()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2167,43 +2253,64 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro ao excluir", str(exc))
 
     def _export_selected(self) -> None:
-        if self._automatic_mode:
-            selected_count = self._selected_rows
-            workbook_id = None
-        elif self._current_workbook_id is not None:
-            workbook_id = self._current_workbook_id
-            selected_count = self._view_model.load_guests(
+        workbook_id = self._current_workbook_id
+        if workbook_id is None:
+            workbooks = self._view_model.list_workbooks()
+            workbook_id = workbooks[0].id if len(workbooks) == 1 else None
+
+        if workbook_id is not None:
+            final_count = self._view_model.load_guests(
                 import_id=None,
                 workbook_id=workbook_id,
                 page=0,
                 page_size=50,
                 selected_only=True,
             ).total_rows
+            unified_count = self._view_model.load_guests(
+                import_id=None,
+                workbook_id=workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=False,
+            ).total_rows
+        elif self._automatic_mode:
+            final_count = self._selected_rows
+            unified_count = 0
         else:
             return
 
-        if selected_count == 0:
+        if final_count == 0 and unified_count == 0:
             QMessageBox.warning(
                 self,
-                "Nenhum selecionado",
-                "Selecione pelo menos um convidado antes de exportar.",
+                "Nada para exportar",
+                "Importe uma planilha ou selecione convidados antes de exportar.",
             )
             return
 
+        export_choice = self._choose_export_mode(final_count, unified_count)
+        if export_choice is None:
+            return
+        export_scope, export_mode, export_format, default_file_name = export_choice
+        output_filter = "PDF (*.pdf)" if export_format == "pdf" else "Planilhas Excel (*.xlsx)"
+
         output_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Salvar planilha automática",
-            str(Path.home() / "mala_direta_selecionados.xlsx"),
-            "Planilhas Excel (*.xlsx)",
+            "Salvar exportação",
+            str(Path.home() / default_file_name),
+            output_filter,
         )
         if not output_path:
             return
 
+        export_workbook_id = workbook_id if export_scope == "unified" or not self._automatic_mode else None
         try:
             result = self._view_model.export_selected(
                 import_id=None,
-                workbook_id=workbook_id,
+                workbook_id=export_workbook_id,
                 output_path=output_path,
+                export_mode=export_mode,
+                export_scope=export_scope,
+                export_format=export_format,
             )
             self.status_label.setText(f"{result.total_rows} convidados exportados.")
             QMessageBox.information(
@@ -2213,6 +2320,103 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao exportar", str(exc))
+
+    def _choose_export_mode(self, final_count: int, unified_count: int) -> tuple[str, str, str, str] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Exportar planilha")
+        dialog.resize(480, 390)
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel("Escolha o conteúdo e o formato da exportação.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        source_label = QLabel("O que exportar")
+        source_label.setObjectName("SmallLabel")
+        layout.addWidget(source_label)
+
+        source_panel = QWidget(dialog)
+        source_layout = QVBoxLayout(source_panel)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        final_radio = QRadioButton(f"Lista final ({final_count} convidados)")
+        unified_radio = QRadioButton(f"Lista unificada ({unified_count} registros)")
+        final_radio.setEnabled(final_count > 0)
+        unified_radio.setEnabled(unified_count > 0)
+        if final_count > 0:
+            final_radio.setChecked(True)
+        elif unified_count > 0:
+            unified_radio.setChecked(True)
+        source_layout.addWidget(final_radio)
+        source_layout.addWidget(unified_radio)
+        layout.addWidget(source_panel)
+
+        file_type_label = QLabel("Tipo de arquivo")
+        file_type_label.setObjectName("SmallLabel")
+        layout.addWidget(file_type_label)
+
+        file_type_panel = QWidget(dialog)
+        file_type_layout = QVBoxLayout(file_type_panel)
+        file_type_layout.setContentsMargins(0, 0, 0, 0)
+        xlsx_radio = QRadioButton("Excel (.xlsx)")
+        pdf_radio = QRadioButton("PDF - lista de presença")
+        xlsx_radio.setChecked(True)
+        file_type_layout.addWidget(xlsx_radio)
+        file_type_layout.addWidget(pdf_radio)
+        layout.addWidget(file_type_panel)
+
+        format_label = QLabel("Formato")
+        format_label.setObjectName("SmallLabel")
+        layout.addWidget(format_label)
+
+        format_panel = QWidget(dialog)
+        format_layout = QVBoxLayout(format_panel)
+        format_layout.setContentsMargins(0, 0, 0, 0)
+        complete_radio = QRadioButton("Planilha completa")
+        names_radio = QRadioButton("Apenas nomes")
+        category_radio = QRadioButton("Separar por categoria")
+        complete_radio.setChecked(True)
+        format_layout.addWidget(complete_radio)
+        format_layout.addWidget(names_radio)
+        format_layout.addWidget(category_radio)
+        layout.addWidget(format_panel)
+
+        def update_format_options() -> None:
+            pdf_selected = pdf_radio.isChecked()
+            complete_radio.setEnabled(not pdf_selected)
+            category_radio.setEnabled(not pdf_selected)
+            if pdf_selected:
+                names_radio.setChecked(True)
+
+        xlsx_radio.toggled.connect(update_format_options)
+        pdf_radio.toggled.connect(update_format_options)
+        update_format_options()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Continuar")
+        if cancel_button is not None:
+            cancel_button.setText("Cancelar")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        export_scope = "unified" if unified_radio.isChecked() else "final"
+        scope_file_part = "lista_unificada" if export_scope == "unified" else "lista_final"
+        export_format = "pdf" if pdf_radio.isChecked() else "xlsx"
+        if export_format == "pdf":
+            return export_scope, "names", export_format, f"mala_direta_{scope_file_part}_presenca.pdf"
+        if names_radio.isChecked():
+            return export_scope, "names", export_format, f"mala_direta_{scope_file_part}_nomes.xlsx"
+        if category_radio.isChecked():
+            return export_scope, "category", export_format, f"mala_direta_{scope_file_part}_por_categoria.xlsx"
+        return export_scope, "complete", export_format, f"mala_direta_{scope_file_part}.xlsx"
 
     def _go_first_page(self) -> None:
         self._marked_guest_ids.clear()
@@ -2238,12 +2442,10 @@ class MainWindow(QMainWindow):
         widgets = (
             self.import_button,
             self.export_button,
+            self.options_button,
             self.workbook_tabs,
             self.sheet_tabs,
-            self.duplicates_button,
-            self.filter_button,
             self.search_input,
-            self.search_button,
             self.clear_search_button,
             self.table_send_button,
             self.select_page_button,
@@ -2270,9 +2472,8 @@ class MainWindow(QMainWindow):
         can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
         has_next = self._total_rows > (self._current_page + 1) * max(self._page_size, 1)
 
-        self.search_button.setEnabled(has_workspace)
         self.clear_search_button.setEnabled(has_workspace)
-        self.filter_button.setEnabled(has_workspace and bool(self._available_columns))
+        self.options_button.setEnabled(has_workspace)
         self.export_button.setEnabled(has_workbook or self._automatic_mode)
         self.table_send_button.setVisible(can_select)
         self.table_send_button.setEnabled(can_select and bool(self._marked_guest_ids))

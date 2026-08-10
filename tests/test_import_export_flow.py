@@ -1,9 +1,11 @@
+from collections.abc import Iterable
 from pathlib import Path
 import tempfile
 import unittest
 
 from openpyxl import Workbook, load_workbook
 
+from app.application.use_cases.consolidate_imported_data import ConsolidateImportedDataUseCase
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase
@@ -12,12 +14,174 @@ from app.application.use_cases.merge_workbooks import MergeWorkbooksUseCase
 from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
+from app.domain.entities.guest_record import GuestRecord
 from app.infrastructure.repositories.sqlite_guest_repository import SqliteGuestRepository
 from app.infrastructure.spreadsheet.openpyxl_exporter import OpenpyxlSelectedGuestsExporter
 from app.infrastructure.spreadsheet.openpyxl_reader import OpenpyxlSpreadsheetReader
 
 
+class CapturingPdfExporter(OpenpyxlSelectedGuestsExporter):
+    def __init__(self) -> None:
+        self.pdf_names: list[str] = []
+
+    def export_name_checklist_pdf(
+        self,
+        output_path: str,
+        guests: Iterable[GuestRecord],
+        title: str,
+    ) -> int:
+        self.pdf_names = [str(guest.data.get("Nome", "")) for guest in guests]
+        Path(output_path).write_bytes(b"%PDF-1.4\n% test\n")
+        return len([name for name in self.pdf_names if name])
+
+
 class ImportExportFlowTest(unittest.TestCase):
+    def test_consolidates_workbooks_and_keeps_most_complete_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            first_spreadsheet = temp_path / "lista_original.xlsx"
+            second_spreadsheet = temp_path / "lista_nova.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            self._create_contact_workbook(
+                first_spreadsheet,
+                "Amigos",
+                ["Nome", "Telefone", "E-mail", "CEP", "ENDERECO"],
+                [["Ana Silva", "3268-1279", "", "", ""]],
+            )
+            self._create_contact_workbook(
+                second_spreadsheet,
+                "Convidados",
+                ["Nome", "Telefone", "E-mail", "CEP", "ENDERECO"],
+                [["Ana da Silva", "", "ana@example.com", "50000-000", "Rua Alpha, 100"]],
+            )
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_use_case = ImportSpreadsheetUseCase(repository, OpenpyxlSpreadsheetReader())
+
+            first_import = import_use_case.execute_workbook(str(first_spreadsheet))
+            import_use_case.execute_workbook(str(second_spreadsheet))
+
+            result = ConsolidateImportedDataUseCase(repository).execute()
+
+            self.assertEqual(result.workbook_id, first_import.workbook_id)
+            self.assertEqual(result.moved_sheets, 1)
+            self.assertEqual(result.removed_duplicates, 1)
+            self.assertEqual(result.total_rows, 1)
+            self.assertEqual(len(repository.list_workbooks()), 1)
+
+            page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=first_import.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            self.assertEqual(page.total_rows, 1)
+            self.assertEqual(page.rows[0].data["Nome"], "Ana da Silva")
+            self.assertEqual(page.rows[0].data["Telefone"], "3268-1279")
+            self.assertEqual(page.rows[0].data["E-mail"], "ana@example.com")
+            self.assertEqual(page.rows[0].data["CEP"], "50000-000")
+            self.assertEqual(page.rows[0].data["ENDERECO"], "Rua Alpha, 100")
+
+            duplicates_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=None,
+                page=0,
+                page_size=50,
+                duplicates_only=True,
+            )
+            self.assertEqual(duplicates_page.total_rows, 0)
+
+    def test_edits_blank_cells_when_column_is_missing_from_row_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            spreadsheet_path = temp_path / "listas_com_colunas_diferentes.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+
+            workbook = Workbook()
+            first_sheet = workbook.active
+            first_sheet.title = "Amigos"
+            first_sheet.append(["Nome", "Telefone"])
+            first_sheet.append(["Ana Silva", ""])
+            second_sheet = workbook.create_sheet("Arquitetos")
+            second_sheet.append(["Nome", "Endereço"])
+            second_sheet.append(["Bruno Costa", "Rua Beta, 200"])
+            workbook.save(spreadsheet_path)
+            workbook.close()
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_result = ImportSpreadsheetUseCase(
+                repository,
+                OpenpyxlSpreadsheetReader(),
+            ).execute_workbook(str(spreadsheet_path))
+
+            unified_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            self.assertEqual(unified_page.columns, ("Lista", "Nome", "Telefone", "Endereço"))
+            ana_row = next(row for row in unified_page.rows if row.data["Nome"] == "Ana Silva")
+            self.assertEqual(ana_row.data["Endereço"], "")
+
+            selection_use_case = UpdateGuestSelectionUseCase(repository)
+            selection_use_case.set_guest_selected(ana_row.id, True)
+
+            update_data_use_case = UpdateGuestDataUseCase(repository)
+            update_data_use_case.execute(
+                guest_id=ana_row.id,
+                column_name="Endereço",
+                value="Rua da Lista Final, 10",
+                automatic=True,
+            )
+
+            selected_page = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            self.assertEqual(selected_page.rows[0].data["Endereço"], "Rua da Lista Final, 10")
+
+            source_page_before_edit = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            self.assertNotIn("Endereço", source_page_before_edit.columns)
+
+            update_data_use_case.execute(
+                guest_id=ana_row.id,
+                column_name="Endereço",
+                value="Rua da Origem, 20",
+            )
+
+            source_page_after_edit = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            self.assertEqual(source_page_after_edit.columns, ("Nome", "Telefone", "Endereço"))
+            self.assertEqual(source_page_after_edit.rows[0].data["Endereço"], "Rua da Origem, 20")
+
+            selected_page_after_source_edit = ListGuestsUseCase(repository).execute(
+                import_id=None,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+                selected_only=True,
+            )
+            self.assertEqual(
+                selected_page_after_source_edit.rows[0].data["Endereço"],
+                "Rua da Lista Final, 10",
+            )
+
     def test_merges_workbooks_and_preserves_tabs_selection_and_automatic_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -557,6 +721,203 @@ class ImportExportFlowTest(unittest.TestCase):
             )
             self.assertEqual(selected_page_after_clear.total_rows, 0)
 
+    def test_exports_selected_guests_as_names_and_by_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            spreadsheet_path = temp_path / "categorias.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+            names_export_path = temp_path / "nomes.xlsx"
+            category_export_path = temp_path / "categorias_exportadas.xlsx"
+            unified_export_path = temp_path / "lista_unificada.xlsx"
+            final_pdf_export_path = temp_path / "lista_final_presenca.pdf"
+            unified_pdf_export_path = temp_path / "lista_unificada_presenca.pdf"
+
+            self._create_contact_workbook(
+                spreadsheet_path,
+                "Lista",
+                ["Nome", "NOME", "Categoria", "Telefone"],
+                [
+                    ["", "Ana Silva", "Amigos", "90000-0001"],
+                    ["", "Bruno Lima", "Advogados", "90000-0002"],
+                    ["", "Carla Souza", "Amigos", "90000-0003"],
+                ],
+            )
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_result = ImportSpreadsheetUseCase(
+                guest_repository=repository,
+                spreadsheet_reader=OpenpyxlSpreadsheetReader(),
+            ).execute_workbook(str(spreadsheet_path))
+
+            page = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            UpdateGuestSelectionUseCase(repository).set_page_selected(
+                [row.id for row in page.rows[:2]],
+                True,
+            )
+
+            export_use_case = ExportSelectedGuestsUseCase(
+                guest_repository=repository,
+                exporter=OpenpyxlSelectedGuestsExporter(),
+            )
+            names_result = export_use_case.execute(
+                None,
+                str(names_export_path),
+                workbook_id=import_result.workbook_id,
+                export_mode="names",
+            )
+            category_result = export_use_case.execute(
+                None,
+                str(category_export_path),
+                workbook_id=import_result.workbook_id,
+                export_mode="category",
+                export_scope="unified",
+            )
+            unified_result = export_use_case.execute(
+                None,
+                str(unified_export_path),
+                workbook_id=import_result.workbook_id,
+                export_mode="complete",
+                export_scope="unified",
+            )
+            final_pdf_result = export_use_case.execute(
+                None,
+                str(final_pdf_export_path),
+                workbook_id=import_result.workbook_id,
+                export_format="pdf",
+            )
+            unified_pdf_result = export_use_case.execute(
+                None,
+                str(unified_pdf_export_path),
+                workbook_id=import_result.workbook_id,
+                export_scope="unified",
+                export_format="pdf",
+            )
+
+            self.assertEqual(names_result.total_rows, 2)
+            self.assertEqual(names_result.columns, ("Nome",))
+            self.assertEqual(category_result.total_rows, 3)
+            self.assertEqual(unified_result.total_rows, 3)
+            self.assertEqual(unified_result.sheet_name, "Lista unificada")
+            self.assertEqual(final_pdf_result.total_rows, 2)
+            self.assertEqual(final_pdf_result.columns, ("Nome",))
+            self.assertEqual(final_pdf_result.file_name, "lista_final_presenca.pdf")
+            self.assertEqual(unified_pdf_result.total_rows, 3)
+            self.assertEqual(unified_pdf_result.columns, ("Nome",))
+            self.assertEqual(unified_pdf_result.file_name, "lista_unificada_presenca.pdf")
+            self.assertGreater(final_pdf_export_path.stat().st_size, 1000)
+            self.assertGreater(unified_pdf_export_path.stat().st_size, 1000)
+            self.assertEqual(final_pdf_export_path.read_bytes()[:4], b"%PDF")
+            self.assertEqual(unified_pdf_export_path.read_bytes()[:4], b"%PDF")
+
+            names_workbook = load_workbook(names_export_path, read_only=True)
+            try:
+                names_rows = list(names_workbook["Nomes"].iter_rows(values_only=True))
+            finally:
+                names_workbook.close()
+            self.assertEqual(
+                names_rows,
+                [
+                    ("Nome",),
+                    ("Ana Silva",),
+                    ("Bruno Lima",),
+                ],
+            )
+
+            unified_workbook = load_workbook(unified_export_path, read_only=True)
+            try:
+                unified_rows = list(unified_workbook["Lista unificada"].iter_rows(values_only=True))
+            finally:
+                unified_workbook.close()
+            self.assertEqual(len(unified_rows), 4)
+            self.assertEqual(unified_rows[0], ("Lista", "Nome", "NOME", "Categoria", "Telefone"))
+            self.assertEqual(unified_rows[3][2], "Carla Souza")
+
+            category_workbook = load_workbook(category_export_path, read_only=True)
+            try:
+                self.assertIn("Resumo", category_workbook.sheetnames)
+                self.assertIn("Amigos", category_workbook.sheetnames)
+                self.assertIn("Advogados", category_workbook.sheetnames)
+                summary_rows = list(category_workbook["Resumo"].iter_rows(values_only=True))
+                amigos_rows = list(category_workbook["Amigos"].iter_rows(values_only=True))
+                advogados_rows = list(category_workbook["Advogados"].iter_rows(values_only=True))
+            finally:
+                category_workbook.close()
+
+            self.assertEqual(summary_rows, [("Categoria", "Quantidade"), ("Advogados", 1), ("Amigos", 2)])
+            self.assertEqual(amigos_rows[0], ("Lista", "Nome", "NOME", "Categoria", "Telefone"))
+            self.assertEqual(amigos_rows[1][2], "Ana Silva")
+            self.assertEqual(amigos_rows[2][2], "Carla Souza")
+            self.assertEqual(advogados_rows[1][2], "Bruno Lima")
+
+    def test_exports_pdf_names_with_automatic_honorifics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            spreadsheet_path = temp_path / "tratamentos.xlsx"
+            database_path = temp_path / "mala_direta.sqlite3"
+            pdf_export_path = temp_path / "lista_presenca.pdf"
+
+            self._create_contact_workbook(
+                spreadsheet_path,
+                "Lista",
+                ["Nome", "Tratamento", "Sexo"],
+                [
+                    ["Ana Silva", "", ""],
+                    ["Bruno Lima", "", ""],
+                    ["Patricia Gomes", "SRA", ""],
+                    ["Carlos Rocha", "SR", ""],
+                    ["Alex Souza", "", "F"],
+                    ["Taylor Costa", "", ""],
+                ],
+            )
+
+            repository = SqliteGuestRepository(database_path)
+            repository.initialize()
+            import_result = ImportSpreadsheetUseCase(
+                guest_repository=repository,
+                spreadsheet_reader=OpenpyxlSpreadsheetReader(),
+            ).execute_workbook(str(spreadsheet_path))
+
+            page = ListGuestsUseCase(repository).execute(
+                import_id=import_result.imported_sheets[0].import_id,
+                workbook_id=import_result.workbook_id,
+                page=0,
+                page_size=50,
+            )
+            UpdateGuestSelectionUseCase(repository).set_page_selected(
+                [row.id for row in page.rows],
+                True,
+            )
+
+            exporter = CapturingPdfExporter()
+            result = ExportSelectedGuestsUseCase(
+                guest_repository=repository,
+                exporter=exporter,
+            ).execute(
+                None,
+                str(pdf_export_path),
+                workbook_id=import_result.workbook_id,
+                export_format="pdf",
+            )
+
+            self.assertEqual(result.total_rows, 6)
+            self.assertEqual(
+                exporter.pdf_names,
+                [
+                    "SRA. ANA SILVA",
+                    "SR. BRUNO LIMA",
+                    "SRA. PATRICIA GOMES",
+                    "SR. CARLOS ROCHA",
+                    "SRA. ALEX SOUZA",
+                    "SR(A). TAYLOR COSTA",
+                ],
+            )
+
     def _create_workbook(self, path: Path) -> None:
         workbook = Workbook()
         summary = workbook.active
@@ -594,6 +955,22 @@ class ImportExportFlowTest(unittest.TestCase):
         worksheet.title = sheet_name
         worksheet.append(["Nome", "Telefone"])
         worksheet.append([name, phone])
+        workbook.save(path)
+        workbook.close()
+
+    def _create_contact_workbook(
+        self,
+        path: Path,
+        sheet_name: str,
+        columns: list[str],
+        rows: list[list[str]],
+    ) -> None:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = sheet_name
+        worksheet.append(columns)
+        for row in rows:
+            worksheet.append(row)
         workbook.save(path)
         workbook.close()
 

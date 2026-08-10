@@ -111,7 +111,8 @@ O MVP atual permite:
 13. Visualizar a planilha automática de selecionados como uma guia superior própria.
 14. Exportar os convidados selecionados para um novo `.xlsx`.
 
-O banco local é criado automaticamente em `data/mala_direta.sqlite3`.
+No ambiente de desenvolvimento, o banco local é criado automaticamente em `data/mala_direta.sqlite3`.
+Na versão `.exe`, o banco é criado automaticamente em `%LOCALAPPDATA%\MalaDireta\mala_direta.sqlite3`.
 
 Arquivos já importados ficam salvos no banco local. Para renomear ou remover um arquivo do sistema, clique com o botão direito na aba superior do arquivo e escolha `Renomear planilha` ou `Excluir planilha`.
 
@@ -132,6 +133,18 @@ ambiente_config\Scripts\python.exe -m unittest
 ```
 
 ## Distribuição
+
+Para gerar a pasta executável do Windows:
+
+```powershell
+.\scripts\build_exe.ps1 -Clean
+```
+
+O resultado fica em `dist\MalaDireta\Mala Direta.exe`. Para entregar em outra máquina, envie a pasta inteira `dist\MalaDireta`.
+
+Para criar o atalho correto na área de trabalho, execute `Criar atalho Mala Direta.cmd` dentro da pasta `dist\MalaDireta`. Não arraste apenas o `.exe` para fora da pasta, porque o aplicativo precisa da pasta `_internal` para abrir corretamente.
+
+Mais detalhes estão em [docs/EMPACOTAMENTO_EXE.md](docs/EMPACOTAMENTO_EXE.md).
 
 Planned methods for delivering the application to the user:
 

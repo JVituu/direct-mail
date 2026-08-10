@@ -34,6 +34,7 @@ class GuestTableModel(QAbstractTableModel):
         rows: Sequence[GuestRowDTO],
         columns: Sequence[str],
         editable_columns: Sequence[str],
+        marked_guest_ids: set[int],
         selection_changed: Callable[[int, bool], None],
         cell_changed: Callable[[int, str, str], bool],
         highlight_selected_rows: bool = True,
@@ -42,6 +43,7 @@ class GuestTableModel(QAbstractTableModel):
         self._rows = list(rows)
         self._columns = list(columns)
         self._editable_columns = set(editable_columns)
+        self._marked_guest_ids = marked_guest_ids
         self._selection_changed = selection_changed
         self._cell_changed = cell_changed
         self._highlight_selected_rows = highlight_selected_rows
@@ -69,6 +71,12 @@ class GuestTableModel(QAbstractTableModel):
                 return Qt.AlignmentFlag.AlignCenter
             return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 
+        if role == Qt.ItemDataRole.CheckStateRole and column == 0 and row.selectable:
+            return Qt.CheckState.Checked if self._is_row_checked(row) else Qt.CheckState.Unchecked
+
+        if role == Qt.ItemDataRole.ToolTipRole and column == 2 and row.duplicate_count > 1:
+            return "Clique para visualizar os registros parecidos."
+
         if role == Qt.ItemDataRole.SizeHintRole:
             line_count = self._cell_line_count(row, column)
             if line_count <= 1:
@@ -76,13 +84,13 @@ class GuestTableModel(QAbstractTableModel):
             height = max(DEFAULT_ROW_HEIGHT, line_count * MULTILINE_LINE_HEIGHT + MULTILINE_ROW_PADDING)
             return QSize(-1, height)
 
-        if role == Qt.ItemDataRole.FontRole and column == 0 and row.selected:
+        if role == Qt.ItemDataRole.FontRole and column == 0 and self._is_row_checked(row):
             font = QFont()
             font.setBold(True)
             return font
 
-        if role == Qt.ItemDataRole.ForegroundRole and column == 0 and row.selected:
-            return QBrush(QColor("#126c50"))
+        if role == Qt.ItemDataRole.ForegroundRole and column == 0 and self._is_row_checked(row):
+            return QBrush(QColor("#111827"))
 
         if role == Qt.ItemDataRole.FontRole and column == 2 and row.duplicate_count > 1:
             font = QFont()
@@ -92,8 +100,11 @@ class GuestTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole and column == 2 and row.duplicate_count > 1:
             return QBrush(QColor("#9a4d00"))
 
-        if role == Qt.ItemDataRole.BackgroundRole and self._highlight_selected_rows and row.selected:
+        if role == Qt.ItemDataRole.BackgroundRole and self._highlight_selected_rows and self._is_row_checked(row):
             return QBrush(QColor("#e1f5e8"))
+
+        if role == Qt.ItemDataRole.BackgroundRole and column == 2 and row.duplicate_count > 1:
+            return QBrush(QColor("#fff4df"))
 
         if role == Qt.ItemDataRole.BackgroundRole and column in self._category_column_indexes:
             category_value = self._category_value(row, column)
@@ -108,7 +119,7 @@ class GuestTableModel(QAbstractTableModel):
             return None
 
         if column == 0:
-            return "X" if row.selected and row.selectable else ""
+            return ""
         if column == 1:
             return row.verification_code
         if column == 2:
@@ -148,6 +159,8 @@ class GuestTableModel(QAbstractTableModel):
             return Qt.ItemFlag.NoItemFlags
 
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if index.column() == 0 and self._rows[index.row()].selectable:
+            flags |= Qt.ItemFlag.ItemIsUserCheckable
         if self._is_editable_data_cell(index):
             flags |= Qt.ItemFlag.ItemIsEditable
         return flags
@@ -198,7 +211,7 @@ class GuestTableModel(QAbstractTableModel):
         else:
             selected = bool(value)
 
-        self._set_row_selected(index, selected)
+        self._set_row_checked(index, selected)
         return True
 
     def _is_editable_data_cell(self, index: QModelIndex) -> bool:
@@ -216,15 +229,40 @@ class GuestTableModel(QAbstractTableModel):
         if not row.selectable:
             return False
 
-        self._set_row_selected(index, not row.selected)
+        self._set_row_checked(index, not self._is_row_checked(row))
         return True
 
-    def _set_row_selected(self, index: QModelIndex, selected: bool) -> None:
+    def set_row_selection(self, row_index: int, selected: bool) -> bool:
+        if row_index < 0 or row_index >= len(self._rows):
+            return False
+
+        row = self._rows[row_index]
+        if not row.selectable:
+            return False
+
+        self._set_row_checked(self.index(row_index, 0), selected)
+        return True
+
+    def row_at(self, row_index: int) -> GuestRowDTO | None:
+        if row_index < 0 or row_index >= len(self._rows):
+            return None
+        return self._rows[row_index]
+
+    def _set_row_checked(self, index: QModelIndex, selected: bool) -> None:
         row = self._rows[index.row()]
-        if row.selected == selected:
+        if self._is_row_checked(row) == selected:
             return
 
-        row.selected = selected
+        if row.selected and selected:
+            return
+        if row.selected and not selected:
+            self._selection_changed(row.id, False)
+            return
+
+        if selected:
+            self._marked_guest_ids.add(row.id)
+        else:
+            self._marked_guest_ids.discard(row.id)
         self.dataChanged.emit(
             index,
             index,
@@ -233,9 +271,13 @@ class GuestTableModel(QAbstractTableModel):
                 Qt.ItemDataRole.FontRole,
                 Qt.ItemDataRole.ForegroundRole,
                 Qt.ItemDataRole.BackgroundRole,
+                Qt.ItemDataRole.CheckStateRole,
             ],
         )
         self._selection_changed(row.id, selected)
+
+    def _is_row_checked(self, row: GuestRowDTO) -> bool:
+        return row.selected or row.id in self._marked_guest_ids
 
     def guest_ids(self, selectable_only: bool = True) -> list[int]:
         if not selectable_only:

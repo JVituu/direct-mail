@@ -19,6 +19,7 @@ dist/
 
 uploads/
 exports/
+assets/
 
 .idea/
 .vscode/

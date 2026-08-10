@@ -23,6 +23,16 @@ class GuestRepository(Protocol):
     def delete_workbook(self, workbook_id: int) -> None:
         raise NotImplementedError
 
+    def merge_workbooks(
+        self,
+        source_workbook_id: int,
+        target_workbook_id: int,
+    ) -> tuple[int, int, int]:
+        raise NotImplementedError
+
+    def deduplicate_guests(self, workbook_id: int | None = None) -> int:
+        raise NotImplementedError
+
     def list_workbooks(self) -> list[ImportedWorkbook]:
         raise NotImplementedError
 
@@ -87,6 +97,9 @@ class GuestRepository(Protocol):
     ) -> int:
         raise NotImplementedError
 
+    def clear_automatic_guests(self) -> int:
+        raise NotImplementedError
+
     def get_columns(
         self,
         import_id: int | None = None,
@@ -143,6 +156,13 @@ class GuestRepository(Protocol):
         raise NotImplementedError
 
     def iter_selected_guests(
+        self,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+    ) -> Iterable[GuestRecord]:
+        raise NotImplementedError
+
+    def iter_guests(
         self,
         import_id: int | None = None,
         workbook_id: int | None = None,

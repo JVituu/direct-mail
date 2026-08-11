@@ -145,6 +145,9 @@ class GuestRepository(Protocol):
     def update_automatic_guest_data(self, source_guest_id: int, column_name: str, value: str) -> None:
         raise NotImplementedError
 
+    def set_automatic_guest_status(self, source_guest_id: int, status: str) -> None:
+        raise NotImplementedError
+
     def set_guests_selected(
         self,
         import_id: int | None,

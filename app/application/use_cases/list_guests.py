@@ -130,6 +130,7 @@ class ListGuestsUseCase:
                 selectable=row.selectable,
                 duplicate_reason=row.duplicate_reason,
                 duplicate_count=row.duplicate_count,
+                invitation_status=row.invitation_status,
             )
             for row in rows
         ]

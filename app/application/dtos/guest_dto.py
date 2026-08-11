@@ -73,6 +73,7 @@ class GuestRowDTO:
     selectable: bool = True
     duplicate_reason: str = ""
     duplicate_count: int = 0
+    invitation_status: str = "pending"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,3 +85,9 @@ class GuestPageDTO:
     selected_rows: int
     page: int
     page_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class GuestFilterOptionsDTO:
+    categories: tuple[str, ...]
+    locations: tuple[str, ...]

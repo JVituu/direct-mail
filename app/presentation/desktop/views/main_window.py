@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTableView,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -65,6 +67,12 @@ DIALOG_GENERIC_CONTACT_WORDS = ("contato", "contact")
 DIALOG_EMAIL_WORDS = ("email", "e-mail", "mail")
 DIALOG_CEP_WORDS = ("cep", "codigo postal", "postal code", "zip")
 DIALOG_ADDRESS_WORDS = ("endereco", "address", "logradouro", "rua", "avenida", "av")
+QUICK_FILTER_COLUMN_WORDS = {
+    "name": DIALOG_NAME_WORDS,
+    "category": ("categoria", "category"),
+    "location": ("estado", "cidade", "uf", "city", "municipio"),
+}
+QUICK_FILTER_ORDER = ("name", "category", "location")
 DIALOG_NON_CONTACT_WORDS = (
     *DIALOG_NAME_WORDS,
     *DIALOG_EMAIL_WORDS,
@@ -142,6 +150,53 @@ class SendCornerButton(QPushButton):
         painter.drawPolygon(points)
 
 
+class FilterMenuButton(QPushButton):
+    def paintEvent(self, event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        background = QColor("#ffffff") if not self.underMouse() else QColor("#eef3f9")
+        if not self.isEnabled():
+            background = QColor("#f8fafc")
+        painter.setPen(QPen(QColor("#cfd9e8")))
+        painter.setBrush(QBrush(background))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 4, 4)
+
+        icon_color = QColor("#245783") if self.isEnabled() else QColor("#a8b2c1")
+        funnel = QPolygonF(
+            [
+                QPointF(11, 9),
+                QPointF(23, 9),
+                QPointF(18, 15),
+                QPointF(18, 22),
+                QPointF(15, 24),
+                QPointF(15, 15),
+            ]
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(icon_color))
+        painter.drawPolygon(funnel)
+
+        painter.setPen(QColor("#172033") if self.isEnabled() else QColor("#98a5b8"))
+        painter.drawText(
+            QRect(32, 0, max(self.width() - 48, 1), self.height()),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            self.text(),
+        )
+
+        arrow_color = QColor("#52647d") if self.isEnabled() else QColor("#a8b2c1")
+        arrow = QPolygonF(
+            [
+                QPointF(self.width() - 16, self.height() / 2 - 2),
+                QPointF(self.width() - 8, self.height() / 2 - 2),
+                QPointF(self.width() - 12, self.height() / 2 + 3),
+            ]
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(arrow_color))
+        painter.drawPolygon(arrow)
+
+
 class CircleCheckDelegate(QStyledItemDelegate):
     @staticmethod
     def _is_checked(check_state: object) -> bool:
@@ -209,6 +264,126 @@ class CircleCheckDelegate(QStyledItemDelegate):
         return False
 
 
+class InvitationStatusDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        status = index.data(Qt.ItemDataRole.UserRole)
+        if status is None:
+            super().paint(painter, option, index)
+            return
+
+        view_option = QStyleOptionViewItem(option)
+        self.initStyleOption(view_option, index)
+        view_option.text = ""
+        style = view_option.widget.style() if view_option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, view_option, painter, view_option.widget)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rects = self._action_rects(option.rect)
+        self._draw_sent_action(painter, rects["sent"], status == "sent")
+        self._draw_pending_action(painter, rects["waiting"], status == "waiting")
+        self._draw_remove_action(painter, rects["remove"])
+        painter.restore()
+
+    def editorEvent(
+        self,
+        event: object,
+        model: object,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return False
+
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        for action, rect in self._action_rects(option.rect).items():
+            if rect.contains(position):
+                return bool(model.setData(index, action, Qt.ItemDataRole.UserRole))
+        return False
+
+    def helpEvent(
+        self,
+        event: object,
+        view: object,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        if event.type() == QEvent.Type.ToolTip and index.isValid():
+            for action, rect in self._action_rects(option.rect).items():
+                if rect.contains(event.pos()):
+                    QToolTip.showText(event.globalPos(), self._action_tooltip(action), view)
+                    return True
+            QToolTip.hideText()
+            return True
+        return super().helpEvent(event, view, option, index)
+
+    def _action_rects(self, cell_rect: QRect) -> dict[str, QRect]:
+        size = 17
+        gap = 7
+        total_width = size * 3 + gap * 2
+        start_x = cell_rect.x() + max((cell_rect.width() - total_width) // 2, 0)
+        y = cell_rect.y() + max((cell_rect.height() - size) // 2, 0)
+        return {
+            "sent": QRect(start_x, y, size, size),
+            "waiting": QRect(start_x + size + gap, y, size, size),
+            "remove": QRect(start_x + (size + gap) * 2, y, size, size),
+        }
+
+    def _action_tooltip(self, action: str) -> str:
+        tooltips = {
+            "sent": "Enviado",
+            "waiting": "Em aguardo",
+            "remove": "Remover da lista",
+        }
+        return tooltips.get(action, "")
+
+    def _draw_sent_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        painter.setPen(QPen(QColor("#22a35a"), 1))
+        painter.setBrush(QBrush(QColor("#effaf3") if active else QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
+        painter.setPen(QPen(QColor("#168344"), 1))
+        painter.drawLine(
+            QPointF(rect.left() + 4, rect.center().y()),
+            QPointF(rect.left() + 7, rect.bottom() - 5),
+        )
+        painter.drawLine(
+            QPointF(rect.left() + 7, rect.bottom() - 5),
+            QPointF(rect.right() - 4, rect.top() + 4),
+        )
+
+    def _draw_pending_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        painter.setPen(QPen(QColor("#d8a300"), 1))
+        painter.setBrush(QBrush(QColor("#fff8df") if active else QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#e4ad00")))
+        dot_size = 6
+        painter.drawEllipse(
+            rect.x() + (rect.width() - dot_size) // 2,
+            rect.y() + (rect.height() - dot_size) // 2,
+            dot_size,
+            dot_size,
+        )
+
+    def _draw_remove_action(self, painter: QPainter, rect: QRect) -> None:
+        painter.setPen(QPen(QColor("#dc3b3b"), 1))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QPen(QColor("#dc2626"), 1))
+        painter.drawLine(
+            QPointF(rect.left() + 5, rect.top() + 5),
+            QPointF(rect.right() - 5, rect.bottom() - 5),
+        )
+        painter.drawLine(
+            QPointF(rect.right() - 5, rect.top() + 5),
+            QPointF(rect.left() + 5, rect.bottom() - 5),
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, view_model: MainViewModel) -> None:
         super().__init__()
@@ -226,6 +401,11 @@ class MainWindow(QMainWindow):
         self._imports: list[ImportSummaryDTO] = []
         self._available_columns: tuple[str, ...] = tuple()
         self._visible_columns_by_context: dict[str, set[str]] = {}
+        self._filter_options_context_key: tuple[object, ...] | None = None
+        self._filter_controls_updating = False
+        self._quick_column_filters: set[str] = set()
+        self._selected_category_filters: set[str] = set()
+        self._selected_location_filters: set[str] = set()
         self._duplicates_count_value = 0
         self._marked_guest_ids: set[int] = set()
         self._table_model: GuestTableModel | None = None
@@ -277,6 +457,11 @@ class MainWindow(QMainWindow):
         title_box.addWidget(subtitle)
         layout.addLayout(title_box, 1)
 
+        self.register_button = QPushButton("Cadastrar contato")
+        self.register_button.setObjectName("SecondaryButton")
+        self.register_button.clicked.connect(self._open_guest_registration_dialog)
+        layout.addWidget(self.register_button)
+
         self.import_button = QPushButton("Importar planilha")
         self.import_button.setObjectName("PrimaryButton")
         self.import_button.clicked.connect(self._choose_file)
@@ -289,6 +474,7 @@ class MainWindow(QMainWindow):
 
         self.options_button = QPushButton("Opções")
         self.options_button.clicked.connect(self._show_options_menu)
+        self.options_button.hide()
         layout.addWidget(self.options_button)
 
         return header
@@ -321,24 +507,44 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(10)
 
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar na lista unificada")
+        self.filter_button = FilterMenuButton("[Filtro: Todos]")
+        self.filter_button.setMinimumWidth(140)
+        self.filter_button.clicked.connect(self._show_quick_filter_menu)
+        layout.addWidget(self.filter_button)
+
+        self.column_filter_button = FilterMenuButton("Colunas")
+        self.column_filter_button.setMinimumWidth(120)
+        self.column_filter_button.clicked.connect(self._show_column_filter_menu)
+        layout.addWidget(self.column_filter_button)
+
+        self.select_page_button = QPushButton("Marcar pág.", frame)
+        self.select_page_button.setObjectName("CompactButton")
+        self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
+        layout.addWidget(self.select_page_button)
+
+        self.clear_page_button = QPushButton("Desmarcar pág.", frame)
+        self.clear_page_button.setObjectName("CompactButton")
+        self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
+        layout.addWidget(self.clear_page_button)
+
+        self.search_input = QLineEdit(frame)
+        self.search_input.setPlaceholderText("Buscar por nome, telefone, endereço, obra ou qualquer coluna")
         self.search_input.returnPressed.connect(self._apply_search)
         self.search_input.textChanged.connect(self._schedule_live_search)
         self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.search_input, 1)
 
-        self.clear_search_button = QPushButton("Limpar busca")
+        self.category_filter_combo = QComboBox(frame)
+        self.category_filter_combo.addItem("Categoria: todas", "")
+        self.category_filter_combo.hide()
+
+        self.location_filter_combo = QComboBox(frame)
+        self.location_filter_combo.addItem("Estado/Cidade: todos", "")
+        self.location_filter_combo.hide()
+
+        self.clear_search_button = QPushButton("Limpar", frame)
         self.clear_search_button.clicked.connect(self._clear_search)
         layout.addWidget(self.clear_search_button)
-
-        self.select_page_button = QPushButton("Marcar página")
-        self.select_page_button.clicked.connect(lambda: self._set_page_selection(True))
-        self.select_page_button.setVisible(False)
-
-        self.clear_page_button = QPushButton("Desmarcar página")
-        self.clear_page_button.clicked.connect(lambda: self._set_page_selection(False))
-        self.clear_page_button.setVisible(False)
 
         return frame
 
@@ -481,6 +687,21 @@ class MainWindow(QMainWindow):
                 background: #f1f3f6;
                 border-color: #e1e6ee;
             }
+            QPushButton#CompactButton {
+                padding: 8px 10px;
+                font-size: 12px;
+                min-width: 0;
+            }
+            QPushButton#SecondaryButton {
+                background: #ffffff;
+                border-color: #b9c8dc;
+                color: #0f2f5f;
+                padding: 10px 18px;
+            }
+            QPushButton#SecondaryButton:hover {
+                background: #eef3f9;
+                border-color: #8fb0d8;
+            }
             QPushButton#PrimaryButton {
                 background: #1f5eff;
                 border-color: #1f5eff;
@@ -499,7 +720,7 @@ class MainWindow(QMainWindow):
             QPushButton#SuccessButton:hover {
                 background: #126c50;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background: #ffffff;
                 border: 1px solid #cfd9e8;
                 border-radius: 6px;
@@ -631,6 +852,123 @@ class MainWindow(QMainWindow):
         self._import_thread = None
         self._import_worker = None
 
+    def _open_guest_registration_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Cadastrar convidado")
+        dialog.resize(560, 360)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        title = QLabel("Cadastrar Contato")
+        title.setObjectName("Title")
+        subtitle = QLabel("Adicione um contato diretamente na base de dados.")
+        subtitle.setObjectName("Subtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        name_input = QLineEdit(dialog)
+        name_input.setPlaceholderText("Nome completo")
+        phone_input = QLineEdit(dialog)
+        phone_input.setPlaceholderText("Telefone")
+        mobile_input = QLineEdit(dialog)
+        mobile_input.setPlaceholderText("Celular")
+        email_input = QLineEdit(dialog)
+        email_input.setPlaceholderText("E-mail")
+        address_input = QLineEdit(dialog)
+        address_input.setPlaceholderText("Endereco")
+
+        category_input = QComboBox(dialog)
+        category_input.setEditable(True)
+        category_input.addItem("")
+        for category in self._registration_categories():
+            category_input.addItem(category)
+        category_input.setCurrentText("")
+        if category_input.lineEdit() is not None:
+            category_input.lineEdit().setPlaceholderText("Selecione ou digite uma categoria")
+
+        notes_input = QLineEdit(dialog)
+        notes_input.setPlaceholderText("Observacao")
+
+        form.addRow("NOME:", name_input)
+        form.addRow("TELEFONE:", phone_input)
+        form.addRow("CELULAR:", mobile_input)
+        form.addRow("E-MAIL:", email_input)
+        form.addRow("ENDERECO:", address_input)
+        form.addRow("CATEGORIA:", category_input)
+        form.addRow("OBS:", notes_input)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Cadastrar")
+        if cancel_button is not None:
+            cancel_button.setText("Cancelar")
+
+        def accept_if_valid() -> None:
+            if not name_input.text().strip():
+                QMessageBox.information(dialog, "Cadastrar convidado", "Informe o nome do convidado.")
+                name_input.setFocus()
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_if_valid)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        name_input.setFocus()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        values = {
+            "NOME": name_input.text(),
+            "Telefone": phone_input.text(),
+            "Celular": mobile_input.text(),
+            "E-mail": email_input.text(),
+            "ENDEREÇO": address_input.text(),
+            "Categoria": category_input.currentText(),
+            "OBS": notes_input.text(),
+        }
+
+        try:
+            result = self._view_model.register_guest(values, workbook_id=self._current_workbook_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao cadastrar", str(exc))
+            return
+
+        self._marked_guest_ids.clear()
+        self._current_search = ""
+        self._reset_filter_inputs()
+        self._filter_options_context_key = None
+        self.status_label.setText("Convidado cadastrado na Lista unificada.")
+        self._load_workbooks(preferred_workbook_id=result.workbook_id)
+
+    def _registration_categories(self) -> tuple[str, ...]:
+        try:
+            options = self._view_model.load_filter_options(
+                import_id=None,
+                workbook_id=self._current_workbook_id,
+            )
+            hidden_categories = {"outros - riomar"}
+            return tuple(
+                category
+                for category in options.categories
+                if self._normalize_dialog_text(category) not in hidden_categories
+            )
+        except Exception:
+            return tuple()
+
     def _load_workbooks(self, preferred_workbook_id: int | None = None) -> None:
         workbooks = self._view_model.list_workbooks()
 
@@ -702,7 +1040,8 @@ class MainWindow(QMainWindow):
             self._automatic_mode = False
             self._duplicates_mode = False
         self._current_search = ""
-        self.search_input.clear()
+        self._reset_filter_inputs()
+        self._filter_options_context_key = None
         self._marked_guest_ids.clear()
         self._current_page = 0
         self._load_sheet_tabs()
@@ -753,49 +1092,91 @@ class MainWindow(QMainWindow):
                 return index
         return -1
 
-    def _show_options_menu(self) -> None:
-        menu = QMenu(self)
-
+    def _show_quick_filter_menu(self) -> None:
         has_workspace = (
             self._current_workbook_id is not None
             or self._automatic_mode
             or self._duplicates_mode
         )
-        can_select = (
-            self._current_workbook_id is not None
-            and self._current_sheet_selectable
-            and not self._automatic_mode
-            and not self._duplicates_mode
-            and self._total_rows > 0
+        if not has_workspace:
+            return
+
+        menu = QMenu(self)
+        container = QWidget(menu)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(10, 8, 10, 8)
+        container_layout.setSpacing(8)
+
+        filter_options = (
+            ("Nome", "name"),
+            ("Categoria", "category"),
+            ("Estado", "location"),
         )
-        can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
+        checkboxes: dict[str, QCheckBox] = {}
+        for label, filter_kind in filter_options:
+            checkbox = QCheckBox(label, container)
+            checkbox.setChecked(filter_kind in self._quick_column_filters)
+            container_layout.addWidget(checkbox)
+            checkboxes[filter_kind] = checkbox
 
-        filter_action = menu.addAction("Filtrar colunas")
-        filter_action.setEnabled(has_workspace and bool(self._available_columns))
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 4, 0, 0)
+        button_layout.setSpacing(8)
 
-        duplicates_count = self._duplicates_count_value
-        duplicate_action = menu.addAction(
-            f"Possíveis repetidos ({duplicates_count})"
-            if duplicates_count
-            else "Possíveis repetidos"
-        )
-        duplicate_action.setEnabled(duplicates_count > 0)
+        clear_button = QPushButton("Limpar", container)
+        cancel_button = QPushButton("Cancelar", container)
+        apply_button = QPushButton("Aplicar", container)
+        apply_button.setDefault(True)
 
-        menu.addSeparator()
-        mark_page_action = menu.addAction("Marcar página atual")
-        mark_page_action.setEnabled(can_select)
-        clear_page_action = menu.addAction("Desmarcar página atual")
-        clear_page_action.setEnabled(can_clear_page)
+        button_layout.addWidget(clear_button)
+        button_layout.addStretch(1)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(apply_button)
+        container_layout.addLayout(button_layout)
 
-        selected_action = menu.exec(self.options_button.mapToGlobal(self.options_button.rect().bottomLeft()))
-        if selected_action == filter_action:
-            self._show_column_filter_menu()
-        elif selected_action == duplicate_action:
-            self._open_duplicates_view()
-        elif selected_action == mark_page_action:
-            self._set_page_selection(True)
-        elif selected_action == clear_page_action:
-            self._set_page_selection(False)
+        widget_action = QWidgetAction(menu)
+        widget_action.setDefaultWidget(container)
+        menu.addAction(widget_action)
+
+        clear_button.clicked.connect(lambda: self._set_quick_filter_checkboxes(checkboxes, False))
+        cancel_button.clicked.connect(menu.close)
+        apply_button.clicked.connect(lambda: self._apply_quick_filter_menu(checkboxes, menu))
+        menu.exec(self.filter_button.mapToGlobal(self.filter_button.rect().bottomLeft()))
+
+    def _set_quick_filter_checkboxes(
+        self,
+        checkboxes: dict[str, QCheckBox],
+        checked: bool,
+    ) -> None:
+        for checkbox in checkboxes.values():
+            checkbox.setChecked(checked)
+
+    def _apply_quick_filter_menu(
+        self,
+        checkboxes: dict[str, QCheckBox],
+        menu: QMenu,
+    ) -> None:
+        selected_filters = {
+            filter_kind
+            for filter_kind, checkbox in checkboxes.items()
+            if checkbox.isChecked()
+        }
+        if selected_filters == self._quick_column_filters:
+            menu.close()
+            return
+        self._quick_column_filters = selected_filters
+        self._current_search = ""
+        self._filter_controls_updating = True
+        self.search_input.clear()
+        self._selected_category_filters.clear()
+        self._selected_location_filters.clear()
+        self._filter_controls_updating = False
+        self._update_quick_filter_button_text()
+        menu.close()
+        self._load_table()
+
+    def _show_options_menu(self) -> None:
+        return
 
     def _show_filter_menu(self) -> None:
         if self._automatic_mode or self._duplicates_mode or not self._imports:
@@ -855,12 +1236,15 @@ class MainWindow(QMainWindow):
         buttons_layout.setContentsMargins(0, 0, 0, 0)
         buttons_layout.setSpacing(8)
         show_all_button = QPushButton("Mostrar todas")
+        hide_all_button = QPushButton("Desmarcar todas")
         apply_button = QPushButton("Aplicar")
         cancel_button = QPushButton("Cancelar")
         show_all_button.clicked.connect(lambda: self._set_all_column_items_checked(column_list, True))
+        hide_all_button.clicked.connect(lambda: self._set_all_column_items_checked(column_list, False))
         apply_button.clicked.connect(lambda: self._apply_column_filter_from_list(column_list, menu))
         cancel_button.clicked.connect(menu.close)
         buttons_layout.addWidget(show_all_button)
+        buttons_layout.addWidget(hide_all_button)
         buttons_layout.addStretch(1)
         buttons_layout.addWidget(cancel_button)
         buttons_layout.addWidget(apply_button)
@@ -869,7 +1253,7 @@ class MainWindow(QMainWindow):
         widget_action = QWidgetAction(menu)
         widget_action.setDefaultWidget(container)
         menu.addAction(widget_action)
-        menu.exec(self.options_button.mapToGlobal(self.options_button.rect().bottomLeft()))
+        menu.exec(self.column_filter_button.mapToGlobal(self.column_filter_button.rect().bottomLeft()))
 
     def _apply_column_filter_from_list(self, column_list: QListWidget, menu: QMenu) -> None:
         selected_columns = {
@@ -915,6 +1299,116 @@ class MainWindow(QMainWindow):
             return set(columns)
         return {column_name for column_name in columns if column_name in visible_columns}
 
+    def _quick_visible_columns(self, columns: tuple[str, ...]) -> set[str] | None:
+        if not self._quick_column_filters:
+            return None
+
+        visible_columns = {
+            column_name
+            for column_name in columns
+            if self._matches_quick_column_filter(column_name)
+        }
+        return visible_columns or None
+
+    def _matches_quick_column_filter(self, column_name: str) -> bool:
+        return any(
+            self._matches_quick_filter_kind_column(column_name, filter_kind)
+            for filter_kind in self._active_quick_filter_kinds()
+        )
+
+    def _matches_quick_filter_kind_column(self, column_name: str, filter_kind: str) -> bool:
+        normalized_column = self._normalize_dialog_text(column_name)
+        words = QUICK_FILTER_COLUMN_WORDS.get(filter_kind, tuple())
+        normalized_words = {self._normalize_dialog_text(word) for word in words}
+        return any(word and word in normalized_column for word in normalized_words)
+
+    def _active_quick_filter_kinds(self) -> tuple[str, ...]:
+        return tuple(
+            filter_kind
+            for filter_kind in QUICK_FILTER_ORDER
+            if filter_kind in self._quick_column_filters
+        )
+
+    def _quick_column_groups(self, columns: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+        column_groups: list[tuple[str, ...]] = []
+        for filter_kind in self._active_quick_filter_kinds():
+            matching_columns = tuple(
+                column_name
+                for column_name in columns
+                if self._matches_quick_filter_kind_column(column_name, filter_kind)
+            )
+            if matching_columns:
+                column_groups.append(matching_columns)
+        return tuple(column_groups)
+
+    def _apply_quick_row_filter(
+        self,
+        rows: list[GuestRowDTO],
+        columns: tuple[str, ...],
+    ) -> list[GuestRowDTO]:
+        if not self._quick_column_filters:
+            return rows
+
+        column_groups = self._quick_column_groups(columns)
+        if not column_groups:
+            return rows
+
+        filtered_rows = [
+            row
+            for row in rows
+            if self._quick_row_filter_values(row, column_groups)
+        ]
+        return sorted(
+            filtered_rows,
+            key=lambda row: self._quick_row_sort_key(row, column_groups),
+        )
+
+    def _quick_row_sort_key(
+        self,
+        row: GuestRowDTO,
+        column_groups: tuple[tuple[str, ...], ...],
+    ) -> tuple[str, str, str, int, int]:
+        values = self._quick_row_filter_values(row, column_groups)
+        normalized_values = [self._normalize_dialog_text(value) for value in values]
+        primary_value = normalized_values[0] if normalized_values else ""
+        return (
+            primary_value,
+            " ".join(normalized_values),
+            self._normalize_dialog_text(row.sheet_name),
+            row.row_number,
+            row.id,
+        )
+
+    def _quick_row_filter_values(
+        self,
+        row: GuestRowDTO,
+        column_groups: tuple[tuple[str, ...], ...],
+    ) -> list[str]:
+        values: list[str] = []
+        for columns in column_groups:
+            group_value = self._first_quick_row_group_value(row, columns)
+            if group_value:
+                values.append(group_value)
+        return values
+
+    def _first_quick_row_group_value(
+        self,
+        row: GuestRowDTO,
+        columns: tuple[str, ...],
+    ) -> str:
+        for column_name in columns:
+            value = self._clean_quick_row_value(row.data.get(column_name, ""))
+            if value:
+                return value
+        return ""
+
+    def _clean_quick_row_value(self, value: object) -> str:
+        for item in str(value or "").replace("\r", "\n").split("\n"):
+            clean_item = item.strip()
+            if clean_item:
+                return clean_item
+        return ""
+
     def _apply_column_filter(
         self,
         columns: tuple[str, ...],
@@ -925,6 +1419,10 @@ class MainWindow(QMainWindow):
             return tuple(), tuple()
 
         visible_column_names = self._visible_columns_for_current_context(columns)
+        quick_visible_columns = self._quick_visible_columns(columns)
+        if quick_visible_columns is not None:
+            visible_column_names = visible_column_names.intersection(quick_visible_columns)
+
         filtered_columns = tuple(column_name for column_name in columns if column_name in visible_column_names)
         if not filtered_columns:
             filtered_columns = columns
@@ -937,9 +1435,9 @@ class MainWindow(QMainWindow):
 
     def _update_filter_button_text(self, visible_columns: tuple[str, ...]) -> None:
         if not self._available_columns or len(visible_columns) == len(self._available_columns):
-            self.options_button.setText("Opções")
+            self.column_filter_button.setText("Colunas")
             return
-        self.options_button.setText(f"Opções ({len(visible_columns)}/{len(self._available_columns)})")
+        self.column_filter_button.setText(f"Colunas ({len(visible_columns)}/{len(self._available_columns)})")
 
     def _automatic_selected_count(self) -> int:
         try:
@@ -983,7 +1481,8 @@ class MainWindow(QMainWindow):
         self._automatic_mode = False
         self._duplicates_mode = True
         self._current_search = ""
-        self.search_input.clear()
+        self._reset_filter_inputs()
+        self._filter_options_context_key = None
         self._current_page = 0
         self._load_sheet_tabs()
 
@@ -1048,16 +1547,26 @@ class MainWindow(QMainWindow):
 
     def _apply_search(self) -> None:
         self._search_timer.stop()
-        self._apply_search_text(self.search_input.text())
+        self._apply_search_text()
 
     def _schedule_live_search(self) -> None:
+        if self._filter_controls_updating:
+            return
+        has_workspace = self._current_workbook_id is not None or self._automatic_mode or self._duplicates_mode
+        self.clear_search_button.setEnabled(has_workspace and bool(self.search_input.text().strip()))
         self._search_timer.start()
 
     def _apply_live_search(self) -> None:
-        self._apply_search_text(self.search_input.text())
+        self._apply_search_text()
 
-    def _apply_search_text(self, search_text: str) -> None:
-        search = search_text.strip()
+    def _apply_filter_controls_changed(self) -> None:
+        if self._filter_controls_updating:
+            return
+        self._search_timer.stop()
+        self._apply_search_text()
+
+    def _apply_search_text(self) -> None:
+        search = self._combined_filter_search()
         if search == self._current_search:
             return
         self._current_search = search
@@ -1066,9 +1575,125 @@ class MainWindow(QMainWindow):
         self._load_table()
 
     def _clear_search(self) -> None:
+        self._filter_controls_updating = True
         self.search_input.clear()
+        self._filter_controls_updating = False
         self._search_timer.stop()
-        self._apply_search_text("")
+        self._apply_search_text()
+
+    def _combined_filter_search(self) -> str:
+        return self.search_input.text().strip()
+
+    def _combo_value(self, combo: QComboBox) -> str:
+        value = combo.currentData()
+        return str(value or "").strip()
+
+    def _copy_filter_combo_items(self, source: QComboBox, target: QComboBox) -> None:
+        target.clear()
+        for index in range(source.count()):
+            target.addItem(source.itemText(index), source.itemData(index))
+        target.setCurrentIndex(max(source.currentIndex(), 0))
+
+    def _set_combo_current_data(self, combo: QComboBox, value: object) -> None:
+        target_index = combo.findData(value)
+        combo.setCurrentIndex(target_index if target_index >= 0 else 0)
+
+    def _reset_filter_inputs(self) -> None:
+        self._filter_controls_updating = True
+        self.search_input.clear()
+        self._quick_column_filters.clear()
+        self._selected_category_filters.clear()
+        self._selected_location_filters.clear()
+        if hasattr(self, "category_filter_combo"):
+            self.category_filter_combo.setCurrentIndex(0)
+        if hasattr(self, "location_filter_combo"):
+            self.location_filter_combo.setCurrentIndex(0)
+        self._filter_controls_updating = False
+        self._update_quick_filter_button_text()
+
+    def _update_quick_filter_button_text(self) -> None:
+        if not hasattr(self, "filter_button"):
+            return
+
+        filter_labels = {
+            "name": "Nome",
+            "category": "Categoria",
+            "location": "Estado",
+        }
+        active_filters = [
+            filter_labels[filter_kind]
+            for filter_kind in self._active_quick_filter_kinds()
+        ]
+
+        if not active_filters:
+            self.filter_button.setText("[Filtro: Todos]")
+        else:
+            self.filter_button.setText(f"[Filtro: {active_filters[0]}]")
+
+    def _refresh_filter_options(
+        self,
+        import_id: int | None,
+        workbook_id: int | None,
+        selected_only: bool,
+        duplicates_only: bool,
+    ) -> None:
+        context_key = (import_id, workbook_id, selected_only, duplicates_only)
+        if context_key == self._filter_options_context_key:
+            return
+
+        self._filter_options_context_key = context_key
+        try:
+            options = self._view_model.load_filter_options(
+                import_id=import_id,
+                workbook_id=workbook_id,
+                selected_only=selected_only,
+                duplicates_only=duplicates_only,
+            )
+        except Exception:
+            options = None
+
+        current_category = self._combo_value(self.category_filter_combo)
+        current_location = self._combo_value(self.location_filter_combo)
+        categories = options.categories if options is not None else tuple()
+        locations = options.locations if options is not None else tuple()
+        self._selected_category_filters.intersection_update(categories)
+        self._selected_location_filters.intersection_update(locations)
+        self._set_filter_combo_items(
+            self.category_filter_combo,
+            "Categoria: todas",
+            categories,
+            current_category,
+        )
+        self._set_filter_combo_items(
+            self.location_filter_combo,
+            "Estado/Cidade: todos",
+            locations,
+            current_location,
+        )
+
+    def _reset_filter_options(self) -> None:
+        self._filter_options_context_key = None
+        self._set_filter_combo_items(self.category_filter_combo, "Categoria: todas", tuple(), "")
+        self._set_filter_combo_items(self.location_filter_combo, "Estado/Cidade: todos", tuple(), "")
+
+    def _set_filter_combo_items(
+        self,
+        combo: QComboBox,
+        placeholder: str,
+        values: tuple[str, ...],
+        current_value: str,
+    ) -> None:
+        self._filter_controls_updating = True
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, "")
+        for value in values:
+            combo.addItem(value, value)
+        selected_index = combo.findData(current_value)
+        combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        combo.blockSignals(False)
+        self._filter_controls_updating = False
+        self._update_quick_filter_button_text()
 
     def _load_table(self) -> None:
         if self._automatic_mode:
@@ -1087,8 +1712,11 @@ class MainWindow(QMainWindow):
             selected_only = False
             duplicates_only = False
         else:
+            self._reset_filter_options()
             self._set_table_page([], tuple(), tuple(), 0, 0, 0)
             return
+
+        self._refresh_filter_options(import_id, workbook_id, selected_only, duplicates_only)
 
         try:
             page = self._view_model.load_guests(
@@ -1116,7 +1744,7 @@ class MainWindow(QMainWindow):
 
     def _set_table_page(
         self,
-        rows: list[object],
+        rows: list[GuestRowDTO],
         columns: tuple[str, ...],
         editable_columns: tuple[str, ...],
         total_rows: int,
@@ -1126,6 +1754,7 @@ class MainWindow(QMainWindow):
         self._total_rows = total_rows
         self._selected_rows = selected_rows
         self._page_size = page_size
+        rows = self._apply_quick_row_filter(rows, columns)
         columns, editable_columns = self._apply_column_filter(columns, editable_columns)
         self._table_model = GuestTableModel(
             rows,
@@ -1135,14 +1764,21 @@ class MainWindow(QMainWindow):
             self._on_row_selection_changed,
             self._on_cell_changed,
             highlight_selected_rows=not self._automatic_mode,
+            automatic_mode=self._automatic_mode,
+            invitation_status_changed=self._on_invitation_status_changed,
+            automatic_remove_requested=self._remove_guest_from_automatic,
         )
         self.table.setModel(self._table_model)
-        self.table.setColumnWidth(0, 110)
+        if self._automatic_mode:
+            self.table.setItemDelegateForColumn(0, InvitationStatusDelegate(self.table))
+            self.table.setColumnWidth(0, 120)
+        else:
+            self.table.setItemDelegateForColumn(0, CircleCheckDelegate(self.table))
+            self.table.setColumnWidth(0, 110)
         self.table.setColumnWidth(1, 95)
         self.table.setColumnWidth(2, 120)
-        self.table.setColumnWidth(3, 70)
-        if self.table.model() is not None and self.table.model().columnCount() > 4:
-            self.table.setColumnWidth(4, 190)
+        if self.table.model() is not None and self.table.model().columnCount() > 3:
+            self.table.setColumnWidth(3, 190)
         if self._table_model.has_multiline_cells():
             self.table.resizeRowsToContents()
         self._position_table_send_button()
@@ -1840,6 +2476,27 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro ao editar", str(exc))
             return False
 
+    def _on_invitation_status_changed(self, guest_id: int, status: str) -> bool:
+        try:
+            self._view_model.set_automatic_guest_status(guest_id, status)
+            message = "Convite marcado como enviado." if status == "sent" else "Convite marcado em aguardo."
+            self.status_label.setText(message)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao atualizar convite", str(exc))
+            return False
+
+    def _remove_guest_from_automatic(self, guest_id: int) -> bool:
+        try:
+            self._view_model.set_guest_selected(guest_id, False)
+            self._refresh_automatic_tab_label()
+            self.status_label.setText("Convidado removido da Planilha automÃ¡tica.")
+            self._load_table()
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao remover convidado", str(exc))
+            return False
+
     def _on_table_clicked(self, index: QModelIndex) -> None:
         if not index.isValid() or self._table_model is None:
             return
@@ -2243,7 +2900,8 @@ class MainWindow(QMainWindow):
         try:
             updated_rows = self._view_model.clear_automatic_sheet()
             self._current_search = ""
-            self.search_input.clear()
+            self._reset_filter_inputs()
+            self._filter_options_context_key = None
             self._current_page = 0
             self.status_label.setText(
                 f"Planilha automática excluída. {updated_rows} registros removidos da lista final."
@@ -2440,11 +3098,14 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         widgets = (
+            self.register_button,
             self.import_button,
             self.export_button,
             self.options_button,
             self.workbook_tabs,
             self.sheet_tabs,
+            self.filter_button,
+            self.column_filter_button,
             self.search_input,
             self.clear_search_button,
             self.table_send_button,
@@ -2469,16 +3130,22 @@ class MainWindow(QMainWindow):
             and not self._duplicates_mode
             and self._total_rows > 0
         )
-        can_clear_page = has_workspace and self._table_model is not None and bool(self._table_model.guest_ids())
         has_next = self._total_rows > (self._current_page + 1) * max(self._page_size, 1)
 
-        self.clear_search_button.setEnabled(has_workspace)
+        self.filter_button.setEnabled(has_workspace)
+        self.column_filter_button.setEnabled(has_workspace and bool(self._available_columns))
+        self.search_input.setEnabled(has_workspace)
+        self.clear_search_button.setEnabled(has_workspace and bool(self.search_input.text().strip()))
         self.options_button.setEnabled(has_workspace)
         self.export_button.setEnabled(has_workbook or self._automatic_mode)
         self.table_send_button.setVisible(can_select)
         self.table_send_button.setEnabled(can_select and bool(self._marked_guest_ids))
         self.select_page_button.setEnabled(can_select)
-        self.clear_page_button.setEnabled(can_clear_page)
+        self.clear_page_button.setEnabled(
+            can_select
+            and self._table_model is not None
+            and bool(self._table_model.guest_ids())
+        )
         self.first_page_button.setEnabled(self._current_page > 0)
         self.previous_page_button.setEnabled(self._current_page > 0)
         self.next_page_button.setEnabled(has_next)

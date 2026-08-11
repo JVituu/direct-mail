@@ -2,6 +2,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 from app.application.dtos.guest_dto import (
+    GuestFilterOptionsDTO,
     GuestPageDTO,
     GuestRowDTO,
     ImportResultDTO,
@@ -14,10 +15,12 @@ from app.application.use_cases.consolidate_imported_data import ConsolidateImpor
 from app.application.use_cases.delete_workbook import DeleteWorkbookUseCase
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
+from app.application.use_cases.list_guest_filter_options import ListGuestFilterOptionsUseCase
 from app.application.use_cases.list_guests import ListGuestsUseCase, ListImportsUseCase, ListWorkbooksUseCase
 from app.application.use_cases.manage_automatic_sheet import ManageAutomaticSheetUseCase
 from app.application.use_cases.merge_workbooks import MergeWorkbooksUseCase
 from app.application.use_cases.rename_workbook import RenameWorkbookUseCase
+from app.application.use_cases.register_guest import RegisterGuestUseCase
 from app.application.use_cases.review_duplicate_selection import ReviewDuplicateSelectionUseCase
 from app.application.use_cases.update_guest_data import UpdateGuestDataUseCase
 from app.application.use_cases.update_guest_selection import UpdateGuestSelectionUseCase
@@ -43,12 +46,14 @@ class MainViewModel:
         self._list_workbooks = ListWorkbooksUseCase(guest_repository)
         self._list_imports = ListImportsUseCase(guest_repository)
         self._list_guests = ListGuestsUseCase(guest_repository)
+        self._list_filter_options = ListGuestFilterOptionsUseCase(guest_repository)
         self._consolidate_imported_data = ConsolidateImportedDataUseCase(guest_repository)
         self._update_guest_data = UpdateGuestDataUseCase(guest_repository)
         self._update_selection = UpdateGuestSelectionUseCase(guest_repository)
         self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
         self._merge_workbooks = MergeWorkbooksUseCase(guest_repository)
         self._rename_workbook = RenameWorkbookUseCase(guest_repository)
+        self._register_guest = RegisterGuestUseCase(guest_repository)
         self._manage_automatic_sheet = ManageAutomaticSheetUseCase(guest_repository)
         self._review_duplicate_selection = ReviewDuplicateSelectionUseCase(guest_repository)
         self._export_selected = ExportSelectedGuestsUseCase(
@@ -119,8 +124,25 @@ class MainViewModel:
             duplicates_only=duplicates_only,
         )
 
+    def load_filter_options(
+        self,
+        import_id: int | None,
+        workbook_id: int | None,
+        selected_only: bool = False,
+        duplicates_only: bool = False,
+    ) -> GuestFilterOptionsDTO:
+        return self._list_filter_options.execute(
+            import_id=import_id,
+            workbook_id=workbook_id,
+            selected_only=selected_only,
+            duplicates_only=duplicates_only,
+        )
+
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         self._update_selection.set_guest_selected(guest_id, selected)
+
+    def set_automatic_guest_status(self, guest_id: int, status: str) -> None:
+        self._update_selection.set_automatic_guest_status(guest_id, status)
 
     def list_duplicate_candidates(self, guest_id: int) -> list[GuestRowDTO]:
         return self._review_duplicate_selection.list_duplicate_candidates(guest_id)
@@ -166,6 +188,13 @@ class MainViewModel:
 
     def rename_workbook(self, workbook_id: int, display_name: str) -> None:
         self._rename_workbook.execute(workbook_id, display_name)
+
+    def register_guest(
+        self,
+        values: dict[str, object],
+        workbook_id: int | None = None,
+    ) -> ImportResultDTO:
+        return self._register_guest.execute(values=values, workbook_id=workbook_id)
 
     def automatic_sheet_name(self) -> str:
         return self._manage_automatic_sheet.get_name()

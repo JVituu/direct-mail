@@ -1,5 +1,6 @@
 from collections.abc import Callable, Sequence
 import hashlib
+import re
 from unicodedata import combining, normalize
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt
@@ -23,9 +24,13 @@ CATEGORY_BACKGROUND_COLORS = (
     "#e2e8f0",
 )
 CATEGORY_FOREGROUND_COLOR = "#0f172a"
+AUTOMATIC_SENT_BACKGROUND_COLOR = "#e9f8ef"
+AUTOMATIC_PENDING_BACKGROUND_COLOR = "#fff8df"
 DEFAULT_ROW_HEIGHT = 28
 MULTILINE_ROW_PADDING = 10
 MULTILINE_LINE_HEIGHT = 19
+FIXED_COLUMN_COUNT = 3
+EMAIL_COLUMN_WORDS = ("email", "e-mail", "mail")
 
 
 class GuestTableModel(QAbstractTableModel):
@@ -38,6 +43,9 @@ class GuestTableModel(QAbstractTableModel):
         selection_changed: Callable[[int, bool], None],
         cell_changed: Callable[[int, str, str], bool],
         highlight_selected_rows: bool = True,
+        automatic_mode: bool = False,
+        invitation_status_changed: Callable[[int, str], bool] | None = None,
+        automatic_remove_requested: Callable[[int], bool] | None = None,
     ) -> None:
         super().__init__()
         self._rows = list(rows)
@@ -47,6 +55,9 @@ class GuestTableModel(QAbstractTableModel):
         self._selection_changed = selection_changed
         self._cell_changed = cell_changed
         self._highlight_selected_rows = highlight_selected_rows
+        self._automatic_mode = automatic_mode
+        self._invitation_status_changed = invitation_status_changed
+        self._automatic_remove_requested = automatic_remove_requested
         self._category_column_indexes = self._find_category_column_indexes()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -57,7 +68,7 @@ class GuestTableModel(QAbstractTableModel):
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
             return 0
-        return len(self._columns) + 4
+        return len(self._columns) + FIXED_COLUMN_COUNT
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> object:
         if not index.isValid():
@@ -67,15 +78,26 @@ class GuestTableModel(QAbstractTableModel):
         column = index.column()
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if column in (0, 1, 2, 3):
+            if column < FIXED_COLUMN_COUNT:
                 return Qt.AlignmentFlag.AlignCenter
             return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 
-        if role == Qt.ItemDataRole.CheckStateRole and column == 0 and row.selectable:
+        if (
+            role == Qt.ItemDataRole.CheckStateRole
+            and column == 0
+            and row.selectable
+            and not self._automatic_mode
+        ):
             return Qt.CheckState.Checked if self._is_row_checked(row) else Qt.CheckState.Unchecked
+
+        if role == Qt.ItemDataRole.UserRole and column == 0 and self._automatic_mode:
+            return row.invitation_status
 
         if role == Qt.ItemDataRole.ToolTipRole and column == 2 and row.duplicate_count > 1:
             return "Clique para visualizar os registros parecidos."
+
+        if role == Qt.ItemDataRole.ToolTipRole and column == 0 and self._automatic_mode:
+            return "Verde: convite enviado. Amarelo: em espera. Vermelho: remover da lista final."
 
         if role == Qt.ItemDataRole.SizeHintRole:
             line_count = self._cell_line_count(row, column)
@@ -99,6 +121,12 @@ class GuestTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.ForegroundRole and column == 2 and row.duplicate_count > 1:
             return QBrush(QColor("#9a4d00"))
+
+        if role == Qt.ItemDataRole.BackgroundRole and self._automatic_mode:
+            if row.invitation_status == "sent":
+                return QBrush(QColor(AUTOMATIC_SENT_BACKGROUND_COLOR))
+            if row.invitation_status == "waiting":
+                return QBrush(QColor(AUTOMATIC_PENDING_BACKGROUND_COLOR))
 
         if role == Qt.ItemDataRole.BackgroundRole and self._highlight_selected_rows and self._is_row_checked(row):
             return QBrush(QColor("#e1f5e8"))
@@ -126,11 +154,11 @@ class GuestTableModel(QAbstractTableModel):
             if row.duplicate_count > 1:
                 return f"{row.duplicate_reason} ({row.duplicate_count})"
             return ""
-        if column == 3:
-            return str(row.row_number)
-
-        data_column = self._columns[column - 4]
-        return row.data.get(data_column, "")
+        data_column = self._columns[column - FIXED_COLUMN_COUNT]
+        value = row.data.get(data_column, "")
+        if role == Qt.ItemDataRole.EditRole:
+            return value
+        return self._format_display_value(data_column, value)
 
     def headerData(
         self,
@@ -145,21 +173,19 @@ class GuestTableModel(QAbstractTableModel):
             return str(section + 1)
 
         if section == 0:
-            return "Selecionado"
+            return "Enviado" if self._automatic_mode else "Selecionado"
         if section == 1:
             return "Código"
         if section == 2:
             return "Duplicidade"
-        if section == 3:
-            return "Linha"
-        return self._columns[section - 4]
+        return self._format_header_text(self._columns[section - FIXED_COLUMN_COUNT])
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
 
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if index.column() == 0 and self._rows[index.row()].selectable:
+        if index.column() == 0 and self._rows[index.row()].selectable and not self._automatic_mode:
             flags |= Qt.ItemFlag.ItemIsUserCheckable
         if self._is_editable_data_cell(index):
             flags |= Qt.ItemFlag.ItemIsEditable
@@ -175,13 +201,15 @@ class GuestTableModel(QAbstractTableModel):
             return False
 
         if index.column() == 0:
+            if self._automatic_mode:
+                return self._set_invitation_status_data(index, value, role)
             return self._set_selection_data(index, value, role)
 
         if not self._is_editable_data_cell(index) or role != Qt.ItemDataRole.EditRole:
             return False
 
         row = self._rows[index.row()]
-        column_name = self._columns[index.column() - 4]
+        column_name = self._columns[index.column() - FIXED_COLUMN_COUNT]
         new_value = "" if value is None else str(value).strip()
         if row.data.get(column_name, "") == new_value:
             return True
@@ -214,13 +242,54 @@ class GuestTableModel(QAbstractTableModel):
         self._set_row_checked(index, selected)
         return True
 
-    def _is_editable_data_cell(self, index: QModelIndex) -> bool:
-        if not index.isValid() or index.column() < 4:
+    def _set_invitation_status_data(
+        self,
+        index: QModelIndex,
+        value: object,
+        role: int,
+    ) -> bool:
+        if role not in (Qt.ItemDataRole.EditRole, Qt.ItemDataRole.UserRole):
             return False
-        column_name = self._columns[index.column() - 4]
+
+        row = self._rows[index.row()]
+        action = str(value or "").strip().casefold()
+        if action == "remove":
+            if self._automatic_remove_requested is None:
+                return False
+            return self._automatic_remove_requested(row.id)
+
+        status = "sent" if action == "sent" else "waiting" if action in {"pending", "waiting"} else ""
+        if not status:
+            return False
+        if row.invitation_status == status:
+            return True
+        if self._invitation_status_changed is not None and not self._invitation_status_changed(row.id, status):
+            return False
+
+        row.invitation_status = status
+        first_index = self.index(index.row(), 0)
+        last_index = self.index(index.row(), self.columnCount() - 1)
+        self.dataChanged.emit(
+            first_index,
+            last_index,
+            [
+                Qt.ItemDataRole.DisplayRole,
+                Qt.ItemDataRole.UserRole,
+                Qt.ItemDataRole.ToolTipRole,
+                Qt.ItemDataRole.BackgroundRole,
+            ],
+        )
+        return True
+
+    def _is_editable_data_cell(self, index: QModelIndex) -> bool:
+        if not index.isValid() or index.column() < FIXED_COLUMN_COUNT:
+            return False
+        column_name = self._columns[index.column() - FIXED_COLUMN_COUNT]
         return column_name in self._editable_columns
 
     def toggle_selection(self, row_index: int) -> bool:
+        if self._automatic_mode:
+            return False
         if row_index < 0 or row_index >= len(self._rows):
             return False
 
@@ -233,6 +302,8 @@ class GuestTableModel(QAbstractTableModel):
         return True
 
     def set_row_selection(self, row_index: int, selected: bool) -> bool:
+        if self._automatic_mode:
+            return False
         if row_index < 0 or row_index >= len(self._rows):
             return False
 
@@ -291,24 +362,24 @@ class GuestTableModel(QAbstractTableModel):
         return False
 
     def _cell_line_count(self, row: GuestRowDTO, table_column: int) -> int:
-        if table_column < 4:
+        if table_column < FIXED_COLUMN_COUNT:
             return 1
-        column_name = self._columns[table_column - 4]
+        column_name = self._columns[table_column - FIXED_COLUMN_COUNT]
         value = str(row.data.get(column_name, ""))
         return max(value.count("\n") + 1, 1)
 
     def _find_category_column_indexes(self) -> set[int]:
         indexes: set[int] = set()
-        for column_index, column_name in enumerate(self._columns, start=4):
+        for column_index, column_name in enumerate(self._columns, start=FIXED_COLUMN_COUNT):
             normalized_column = self._normalize_text(column_name)
             if "categoria" in normalized_column or "category" in normalized_column:
                 indexes.add(column_index)
         return indexes
 
     def _category_value(self, row: GuestRowDTO, table_column: int) -> str:
-        if table_column < 4:
+        if table_column < FIXED_COLUMN_COUNT:
             return ""
-        column_name = self._columns[table_column - 4]
+        column_name = self._columns[table_column - FIXED_COLUMN_COUNT]
         return str(row.data.get(column_name, "")).strip()
 
     def _category_color(self, value: str) -> str:
@@ -316,6 +387,26 @@ class GuestTableModel(QAbstractTableModel):
         digest = hashlib.sha1(normalized_value.encode("utf-8")).hexdigest()
         color_index = int(digest[:8], 16) % len(CATEGORY_BACKGROUND_COLORS)
         return CATEGORY_BACKGROUND_COLORS[color_index]
+
+    def _format_header_text(self, value: object) -> str:
+        text = str(value or "").strip().casefold()
+        if not text:
+            return ""
+        return re.sub(
+            r"(^|[\s/])([^\W\d_])",
+            lambda match: f"{match.group(1)}{match.group(2).upper()}",
+            text,
+        )
+
+    def _format_display_value(self, column_name: str, value: object) -> str:
+        text = "" if value is None else str(value)
+        if self._is_email_column(column_name):
+            return text.casefold()
+        return text.upper()
+
+    def _is_email_column(self, column_name: str) -> bool:
+        normalized_column = self._normalize_text(column_name)
+        return any(word and word in normalized_column for word in EMAIL_COLUMN_WORDS)
 
     def _normalize_text(self, value: str) -> str:
         normalized = normalize("NFD", str(value).casefold())

@@ -10,6 +10,10 @@ ambiente_config/
 .env
 *.log
 
+# Credenciais locais do login
+app/shared/security/login_credentials.py
+app/shared/security/login_credentials.local.py
+
 build/
 dist/
 

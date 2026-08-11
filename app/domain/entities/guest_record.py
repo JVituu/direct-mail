@@ -13,3 +13,4 @@ class GuestRecord:
     selectable: bool = True
     duplicate_reason: str = ""
     duplicate_count: int = 0
+    invitation_status: str = "pending"

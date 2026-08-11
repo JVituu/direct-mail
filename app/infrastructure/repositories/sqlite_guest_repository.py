@@ -11,6 +11,7 @@ from app.domain.entities.imported_workbook import ImportedWorkbook
 from app.domain.entities.spreadsheet_import import SpreadsheetImport
 from app.domain.value_objects.spreadsheet_row import SpreadsheetRow
 from app.infrastructure.database.connection import connect
+from app.shared.utils.search_filter import decode_or_filter
 
 
 AUTOMATIC_SHEET_NAME_KEY = "automatic_sheet_name"
@@ -110,6 +111,7 @@ class SqliteGuestRepository:
                     verification_code TEXT NOT NULL,
                     columns_json TEXT NOT NULL DEFAULT '[]',
                     data_json TEXT NOT NULL,
+                    invitation_status TEXT NOT NULL DEFAULT 'pending',
                     created_at TEXT NOT NULL
                 );
 
@@ -798,6 +800,7 @@ class SqliteGuestRepository:
                 automatic_guests.row_number,
                 automatic_guests.verification_code,
                 automatic_guests.data_json,
+                automatic_guests.invitation_status,
                 1 AS selected
             FROM automatic_guests
             WHERE 1 = 1
@@ -884,6 +887,7 @@ class SqliteGuestRepository:
                     automatic_guests.row_number,
                     automatic_guests.verification_code,
                     automatic_guests.data_json,
+                    automatic_guests.invitation_status,
                     1 AS selected
                 FROM automatic_guests
                 JOIN imports ON imports.id = automatic_guests.source_import_id
@@ -970,6 +974,23 @@ class SqliteGuestRepository:
                 """,
                 (columns, json.dumps(data, ensure_ascii=False), source_guest_id),
             )
+
+    def set_automatic_guest_status(self, source_guest_id: int, status: str) -> None:
+        clean_status = str(status or "").strip().casefold()
+        if clean_status not in {"sent", "waiting", "pending"}:
+            raise ValueError("Status de convite invÃ¡lido.")
+
+        with connect(self._database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE automatic_guests
+                SET invitation_status = ?
+                WHERE source_guest_id = ?
+                """,
+                (clean_status, source_guest_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Registro nÃ£o encontrado na Planilha automÃ¡tica.")
 
     def set_guests_selected(
         self,
@@ -1096,6 +1117,7 @@ class SqliteGuestRepository:
                 automatic_guests.row_number,
                 automatic_guests.verification_code,
                 automatic_guests.data_json,
+                automatic_guests.invitation_status,
                 1 AS selected
             FROM automatic_guests
             WHERE 1 = 1
@@ -1277,9 +1299,20 @@ class SqliteGuestRepository:
         if workbook_id is not None:
             query += " AND imports.workbook_id = ?"
             params.append(workbook_id)
-        if search.strip():
+        or_filter_values = decode_or_filter(search)
+        if or_filter_values is not None:
+            if or_filter_values:
+                clauses: list[str] = []
+                for search_term in or_filter_values:
+                    clauses.append("(guests.data_json LIKE ? OR guests.verification_code LIKE ?)")
+                    search_value = f"%{search_term}%"
+                    params.extend([search_value, search_value])
+                query += f" AND ({' OR '.join(clauses)})"
+            return query, params
+
+        for search_term in self._search_terms(search):
             query += " AND (guests.data_json LIKE ? OR guests.verification_code LIKE ?)"
-            search_value = f"%{search.strip()}%"
+            search_value = f"%{search_term}%"
             params.extend([search_value, search_value])
         return query, params
 
@@ -1297,7 +1330,26 @@ class SqliteGuestRepository:
         if workbook_id is not None:
             query += " AND automatic_guests.source_workbook_id = ?"
             params.append(workbook_id)
-        if search.strip():
+        or_filter_values = decode_or_filter(search)
+        if or_filter_values is not None:
+            if or_filter_values:
+                clauses: list[str] = []
+                for search_term in or_filter_values:
+                    clauses.append(
+                        """
+                        (
+                            automatic_guests.data_json LIKE ?
+                            OR automatic_guests.sheet_name LIKE ?
+                            OR automatic_guests.verification_code LIKE ?
+                        )
+                        """
+                    )
+                    search_value = f"%{search_term}%"
+                    params.extend([search_value, search_value, search_value])
+                query += f" AND ({' OR '.join(clauses)})"
+            return query, params
+
+        for search_term in self._search_terms(search):
             query += """
                 AND (
                     automatic_guests.data_json LIKE ?
@@ -1305,9 +1357,16 @@ class SqliteGuestRepository:
                     OR automatic_guests.verification_code LIKE ?
                 )
             """
-            search_value = f"%{search.strip()}%"
+            search_value = f"%{search_term}%"
             params.extend([search_value, search_value, search_value])
         return query, params
+
+    def _search_terms(self, search: str) -> list[str]:
+        return [
+            term
+            for term in re.findall(r"[\wÀ-ÿ@.+-]+", str(search).strip())
+            if term.strip()
+        ]
 
     def _apply_duplicate_filter(self, query: str, guest_id_expression: str) -> str:
         return (
@@ -1651,6 +1710,11 @@ class SqliteGuestRepository:
         automatic_columns = self._table_columns(connection, "automatic_guests")
         if "verification_code" not in automatic_columns:
             connection.execute("ALTER TABLE automatic_guests ADD COLUMN verification_code TEXT")
+        automatic_columns = self._table_columns(connection, "automatic_guests")
+        if "invitation_status" not in automatic_columns:
+            connection.execute(
+                "ALTER TABLE automatic_guests ADD COLUMN invitation_status TEXT NOT NULL DEFAULT 'pending'"
+            )
         workbook_columns = self._table_columns(connection, "workbooks")
         if "display_name" not in workbook_columns:
             connection.execute("ALTER TABLE workbooks ADD COLUMN display_name TEXT")
@@ -1704,6 +1768,11 @@ class SqliteGuestRepository:
             if "data_json" in columns
             else "guests.data_json"
         )
+        invitation_status_expr = (
+            "automatic_guests.invitation_status"
+            if "invitation_status" in columns
+            else "'pending'"
+        )
         created_at_expr = (
             "automatic_guests.created_at"
             if "created_at" in columns
@@ -1723,6 +1792,7 @@ class SqliteGuestRepository:
                 verification_code TEXT NOT NULL,
                 columns_json TEXT NOT NULL DEFAULT '[]',
                 data_json TEXT NOT NULL,
+                invitation_status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL
             )
             """
@@ -1738,6 +1808,7 @@ class SqliteGuestRepository:
                 verification_code,
                 columns_json,
                 data_json,
+                invitation_status,
                 created_at
             )
             SELECT
@@ -1749,6 +1820,7 @@ class SqliteGuestRepository:
                 COALESCE(NULLIF({verification_code_expr}, ''), guests.verification_code, ''),
                 COALESCE(NULLIF({columns_json_expr}, ''), imports.columns_json, '[]'),
                 COALESCE({data_json_expr}, guests.data_json, '{{}}'),
+                COALESCE(NULLIF({invitation_status_expr}, ''), 'pending'),
                 COALESCE({created_at_expr}, datetime('now'))
             FROM automatic_guests_legacy AS automatic_guests
             LEFT JOIN guests ON guests.id = automatic_guests.source_guest_id
@@ -2042,6 +2114,10 @@ class SqliteGuestRepository:
         )
 
     def _to_guest(self, row: object) -> GuestRecord:
+        row_keys = set(row.keys())
+        invitation_status = "pending"
+        if "invitation_status" in row_keys and row["invitation_status"]:
+            invitation_status = str(row["invitation_status"])
         return GuestRecord(
             id=int(row["id"]),
             import_id=int(row["import_id"]),
@@ -2051,4 +2127,5 @@ class SqliteGuestRepository:
             data=json.loads(row["data_json"]),
             selected=bool(row["selected"]),
             selectable=bool(row["is_selectable"]),
+            invitation_status=invitation_status,
         )

@@ -7,13 +7,14 @@ if PROJECT_ROOT_TEXT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT_TEXT)
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from app.infrastructure.database.connection import default_database_path
 from app.infrastructure.repositories.sqlite_guest_repository import SqliteGuestRepository
 from app.infrastructure.spreadsheet.openpyxl_exporter import OpenpyxlSelectedGuestsExporter
 from app.infrastructure.spreadsheet.openpyxl_reader import OpenpyxlSpreadsheetReader
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
+from app.presentation.desktop.views.login_dialog import LoginDialog
 from app.presentation.desktop.views.main_window import MainWindow
 
 
@@ -63,6 +64,12 @@ def main() -> int:
     app = QApplication(sys.argv)
     app_icon = QIcon(str(resource_path(APP_ICON_PATH)))
     app.setWindowIcon(app_icon)
+
+    login_dialog = LoginDialog()
+    login_dialog.setWindowIcon(app_icon)
+    if login_dialog.exec() != QDialog.DialogCode.Accepted:
+        return 0
+
     window = MainWindow(build_view_model())
     window.setWindowIcon(app_icon)
     window.show()

@@ -32,6 +32,31 @@ NAME_HEADER_WORDS = {
     "destinatário",
 }
 CATEGORY_HEADER_WORDS = {"categoria", "category", "grupo", "group", "tipo", "classificacao", "classificação"}
+INSTITUTION_HEADER_WORDS = {
+    "instituicao",
+    "instituição",
+    "empresa",
+    "companhia",
+    "organizacao",
+    "organização",
+    "orgao",
+    "órgão",
+    "entidade",
+    "fundacao",
+    "fundação",
+    "associacao",
+    "associação",
+    "razao social",
+    "razão social",
+    "nome fantasia",
+}
+REPRESENTATIVE_HEADER_WORDS = {
+    "responsavel",
+    "responsável",
+    "representante",
+    "representacao",
+    "representação",
+}
 TREATMENT_HEADER_WORDS = {
     "tratamento",
     "titulo",
@@ -41,6 +66,31 @@ TREATMENT_HEADER_WORDS = {
     "saudação",
 }
 GENDER_HEADER_WORDS = {"sexo", "genero", "gênero"}
+INSTITUTION_VALUE_WORDS = {
+    "associacao",
+    "associação",
+    "camara",
+    "câmara",
+    "companhia",
+    "empresa",
+    "entidade",
+    "faculdade",
+    "fundacao",
+    "fundação",
+    "galeria",
+    "hospital",
+    "instituto",
+    "ltda",
+    "ministerio",
+    "ministério",
+    "museu",
+    "organizacao",
+    "organização",
+    "prefeitura",
+    "s/a",
+    "secretaria",
+    "universidade",
+}
 UNKNOWN_HONORIFIC = "SR(a)."
 MALE_HONORIFIC = "SR."
 FEMALE_HONORIFIC = "SRA."
@@ -227,15 +277,24 @@ class ExportSelectedGuestsUseCase:
 
         if clean_export_format == EXPORT_FORMAT_PDF:
             name_columns = self._find_name_columns(columns)
-            if not name_columns:
-                raise ValueError("Nenhuma coluna de nome foi encontrada para exportar em PDF.")
+            institution_columns = self._find_columns(columns, INSTITUTION_HEADER_WORDS)
+            representative_columns = self._find_columns(columns, REPRESENTATIVE_HEADER_WORDS)
+            if not name_columns and not representative_columns and not institution_columns:
+                raise ValueError("Nenhuma coluna de nome ou instituição foi encontrada para exportar em PDF.")
             treatment_columns = self._find_columns(columns, TREATMENT_HEADER_WORDS)
             gender_columns = self._find_columns(columns, GENDER_HEADER_WORDS)
             export_columns = ("Nome",)
             sheet_name = "Nomes"
             exported_count = self._exporter.export_name_checklist_pdf(
                 str(path),
-                self._with_pdf_name_column(guests, name_columns, treatment_columns, gender_columns),
+                self._with_pdf_name_column(
+                    guests,
+                    name_columns,
+                    treatment_columns,
+                    gender_columns,
+                    institution_columns,
+                    representative_columns,
+                ),
                 title=self._pdf_title(export_scope),
             )
             if exported_count == 0:
@@ -320,11 +379,18 @@ class ExportSelectedGuestsUseCase:
         name_columns: Sequence[str],
         treatment_columns: Sequence[str],
         gender_columns: Sequence[str],
+        institution_columns: Sequence[str],
+        representative_columns: Sequence[str],
     ) -> Iterable[GuestRecord]:
         for guest in guests:
-            name = self._guest_name_value(guest.data, name_columns)
-            honorific = self._guest_honorific_value(guest.data, treatment_columns, gender_columns, name)
-            display_name = f"{honorific} {name}".strip().upper()
+            display_name = self._pdf_guest_display_name(
+                guest.data,
+                name_columns,
+                treatment_columns,
+                gender_columns,
+                institution_columns,
+                representative_columns,
+            )
             yield GuestRecord(
                 id=guest.id,
                 import_id=guest.import_id,
@@ -334,6 +400,38 @@ class ExportSelectedGuestsUseCase:
                 data={"Nome": display_name},
                 selected=guest.selected,
             )
+
+    def _pdf_guest_display_name(
+        self,
+        data: dict[str, str],
+        name_columns: Sequence[str],
+        treatment_columns: Sequence[str],
+        gender_columns: Sequence[str],
+        institution_columns: Sequence[str],
+        representative_columns: Sequence[str],
+    ) -> str:
+        name = self._guest_name_value(data, name_columns)
+        representative = self._guest_name_value(data, representative_columns)
+        institution = self._guest_institution_value(data, institution_columns)
+
+        if not institution and representative and self._looks_like_institution(name):
+            institution = name
+
+        if institution and representative:
+            honorific = self._guest_honorific_value(
+                data,
+                treatment_columns,
+                gender_columns,
+                representative,
+            )
+            return f"{institution} - {honorific} {representative}".strip().upper()
+
+        if institution and not name:
+            return institution.upper()
+
+        display_name = name or representative or institution
+        honorific = self._guest_honorific_value(data, treatment_columns, gender_columns, display_name)
+        return f"{honorific} {display_name}".strip().upper()
 
     def _clean_guests(
         self,
@@ -402,6 +500,26 @@ class ExportSelectedGuestsUseCase:
                 if clean_item:
                     return clean_item
         return ""
+
+    def _guest_institution_value(
+        self,
+        data: dict[str, str],
+        institution_columns: Sequence[str],
+    ) -> str:
+        for column in institution_columns:
+            for item in str(data.get(column, "")).splitlines():
+                clean_item = item.strip()
+                if clean_item:
+                    return clean_item
+        return ""
+
+    def _looks_like_institution(self, value: str) -> bool:
+        normalized_value = self._normalize_match_text(value)
+        if not normalized_value:
+            return False
+        tokens = set(re.findall(r"[a-z0-9/]+", normalized_value))
+        normalized_words = {self._normalize_match_text(word) for word in INSTITUTION_VALUE_WORDS}
+        return any(word in tokens or word in normalized_value for word in normalized_words)
 
     def _guest_honorific_value(
         self,

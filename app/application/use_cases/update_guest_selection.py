@@ -10,6 +10,9 @@ class UpdateGuestSelectionUseCase:
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         self._guest_repository.set_guest_selected(guest_id, selected)
 
+    def set_automatic_guest_status(self, guest_id: int, status: str) -> None:
+        self._guest_repository.set_automatic_guest_status(guest_id, status)
+
     def set_page_selected(self, guest_ids: Sequence[int], selected: bool) -> int:
         if not guest_ids:
             return 0

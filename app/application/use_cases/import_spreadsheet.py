@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from pathlib import Path
+import re
 from unicodedata import combining, normalize
 
 from app.application.dtos.guest_dto import ImportResultDTO, WorkbookImportResultDTO
@@ -12,6 +13,13 @@ ProgressCallback = Callable[[str, int], None]
 
 
 class ImportSpreadsheetUseCase:
+    _EMAIL_HEADER_WORDS = ("email", "e-mail", "mail")
+    _PHONE_HEADER_WORDS = ("telefone", "phone", "fone", "tel")
+    _MOBILE_HEADER_WORDS = ("celular", "whatsapp", "mobile", "cell")
+    _CEP_HEADER_WORDS = ("cep", "codigo postal", "postal code", "zip")
+    _CONTACT_COLUMN_WORDS = ("contato", "contact")
+    _COUNT_HEADER_WORDS = ("quantidade", "qtd", "total")
+    _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
     _CONTACT_HEADER_WORDS = {
         "nome",
         "name",
@@ -135,23 +143,29 @@ class ImportSpreadsheetUseCase:
         columns = self._spreadsheet_reader.read_headers(str(path), selected_sheet)
         if not columns:
             raise ValueError("A planilha precisa ter uma linha de cabeçalho.")
-        is_selectable = self._looks_like_contact_table(columns)
+        should_clean = self._looks_like_contact_table(columns)
+        cleaner = ContactDataCleaner(columns) if should_clean else None
+        active_columns = self._active_columns_for_sheet(path, selected_sheet, columns, cleaner)
+        if not active_columns:
+            raise ValueError(f"A aba '{selected_sheet}' não possui colunas com dados para importar.")
+        is_selectable = self._looks_like_contact_table(active_columns)
 
         import_id = self._guest_repository.create_import(
             workbook_id=workbook_id,
             file_path=str(path),
             sheet_name=selected_sheet,
-            columns=columns,
+            columns=active_columns,
             is_selectable=is_selectable,
         )
 
         total_rows = 0
         batch: list[SpreadsheetRow] = []
-        cleaner = ContactDataCleaner(columns) if is_selectable else None
-
         try:
             for row in self._spreadsheet_reader.iter_rows(str(path), selected_sheet):
-                batch.append(cleaner.clean_row(row) if cleaner is not None else row)
+                clean_row = self._clean_import_row(row, active_columns, cleaner)
+                if clean_row is None:
+                    continue
+                batch.append(clean_row)
                 if len(batch) >= self._batch_size:
                     self._guest_repository.insert_guests(import_id, batch)
                     total_rows += len(batch)
@@ -179,11 +193,91 @@ class ImportSpreadsheetUseCase:
             file_name=path.name,
             sheet_name=selected_sheet,
             total_rows=total_rows,
-            columns=tuple(columns),
+            columns=tuple(active_columns),
             is_selectable=is_selectable,
         )
 
-    def _looks_like_contact_table(self, columns: list[str]) -> bool:
+    def _active_columns_for_sheet(
+        self,
+        path: Path,
+        selected_sheet: str,
+        columns: list[str],
+        cleaner: ContactDataCleaner | None,
+    ) -> tuple[str, ...]:
+        active_columns: set[str] = set()
+        for row in self._spreadsheet_reader.iter_rows(str(path), selected_sheet):
+            values = self._clean_values(row.values, cleaner)
+            for column in columns:
+                if column in active_columns:
+                    continue
+                if self._has_meaningful_value(column, values.get(column, "")):
+                    active_columns.add(column)
+            if len(active_columns) == len(columns):
+                break
+        return tuple(column for column in columns if column in active_columns)
+
+    def _clean_import_row(
+        self,
+        row: SpreadsheetRow,
+        active_columns: tuple[str, ...],
+        cleaner: ContactDataCleaner | None,
+    ) -> SpreadsheetRow | None:
+        values = self._clean_values(row.values, cleaner)
+        pruned_values = {
+            column: value
+            for column in active_columns
+            if (value := self._clean_cell_value(column, values.get(column, "")))
+        }
+        if not pruned_values:
+            return None
+        return SpreadsheetRow(row_number=row.row_number, values=pruned_values)
+
+    def _clean_values(
+        self,
+        values: dict[str, str],
+        cleaner: ContactDataCleaner | None,
+    ) -> dict[str, str]:
+        if cleaner is not None:
+            return cleaner.clean_values(values)
+        return {column: str(value or "").strip() for column, value in values.items()}
+
+    def _clean_cell_value(self, column_name: str, value: object) -> str:
+        text = str(value or "").strip()
+        if not self._has_meaningful_value(column_name, text):
+            return ""
+        return text
+
+    def _has_meaningful_value(self, column_name: str, value: object) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+
+        normalized_column = self._normalize_match_text(column_name)
+        if self._column_matches(normalized_column, self._COUNT_HEADER_WORDS):
+            return True
+        if self._column_matches(normalized_column, self._EMAIL_HEADER_WORDS):
+            return bool(self._EMAIL_PATTERN.search(text))
+        if self._column_matches(normalized_column, self._CEP_HEADER_WORDS):
+            return any(len(re.sub(r"\D+", "", item)) == 8 for item in self._split_cell_values(text))
+        if self._column_matches(normalized_column, self._PHONE_HEADER_WORDS + self._MOBILE_HEADER_WORDS):
+            return any(len(re.sub(r"\D+", "", item)) >= 8 for item in self._split_cell_values(text))
+        if self._column_matches(normalized_column, self._CONTACT_COLUMN_WORDS):
+            return bool(self._EMAIL_PATTERN.search(text)) or any(
+                len(re.sub(r"\D+", "", item)) >= 8 for item in self._split_cell_values(text)
+            )
+        return True
+
+    def _split_cell_values(self, value: str) -> list[str]:
+        return [
+            item.strip()
+            for item in str(value or "").replace("\r", "\n").split("\n")
+            if item.strip()
+        ]
+
+    def _column_matches(self, normalized_column: str, words: tuple[str, ...]) -> bool:
+        return any(word and word in normalized_column for word in words)
+
+    def _looks_like_contact_table(self, columns: tuple[str, ...] | list[str]) -> bool:
         normalized_words = {self._normalize_match_text(word) for word in self._CONTACT_HEADER_WORDS}
         for column in columns:
             normalized_column = self._normalize_match_text(column)

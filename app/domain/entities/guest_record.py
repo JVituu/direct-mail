@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
@@ -14,3 +14,4 @@ class GuestRecord:
     duplicate_reason: str = ""
     duplicate_count: int = 0
     invitation_status: str = "pending"
+    contact_statuses: dict[str, str] = field(default_factory=dict)

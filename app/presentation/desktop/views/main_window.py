@@ -1,10 +1,11 @@
 from math import ceil
 from pathlib import Path
 import re
+import sys
 from unicodedata import combining, normalize
 
 from PySide6.QtCore import QEvent, QModelIndex, QObject, QPointF, QRect, QThread, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -49,7 +50,11 @@ from app.application.dtos.guest_dto import (
     WorkbookSummaryDTO,
 )
 from app.presentation.desktop.viewmodels.main_view_model import MainViewModel
-from app.presentation.desktop.widgets.guest_table_model import GuestTableModel
+from app.presentation.desktop.widgets.guest_table_model import (
+    GroupedGuestTableModel,
+    GuestGroupDTO,
+    GuestTableModel,
+)
 
 
 DIALOG_NAME_WORDS = (
@@ -73,6 +78,47 @@ QUICK_FILTER_COLUMN_WORDS = {
     "location": ("estado", "cidade", "uf", "city", "municipio"),
 }
 QUICK_FILTER_ORDER = ("name", "category", "location")
+DEFAULT_REGISTRATION_CATEGORIES = (
+    "ADVOGADA",
+    "ADVOGADO",
+    "ADVOGADOS",
+    "AMIGOS",
+    "ARQUITETA",
+    "ARQUITETOS",
+    "ART. PLASTICOS",
+    "ATITUDE",
+    "AUTORIDADES",
+    "CON DA ALEMANHA",
+    "CONS DA FRANCA",
+    "CULTURA",
+    "CURADOR",
+    "ESCRITORIO",
+    "EXPERIENCE CLUB",
+    "FAMILIA",
+    "FORNECEDORES",
+    "GALERIA",
+    "JORNALISTAS",
+    "MEDICOS",
+    "OUTROS",
+    "POLITICOS",
+)
+HIDDEN_REGISTRATION_CATEGORIES = {"outros - riomar"}
+COLUMN_DISPLAY_PRIORITY_WORDS = (
+    ("lista",),
+    ("selecao",),
+    ("tratamento",),
+    ("nome", "name", "convidado", "pessoa", "cliente", "participante"),
+    ("categoria", "category", "grupo", "tipo"),
+    ("endereco", "address", "logradouro", "rua", "avenida"),
+    ("edificio", "edif", "predio"),
+    ("cep", "codigo postal", "postal code", "zip"),
+    ("estado", "cidade", "uf", "city", "municipio"),
+    ("telefone", "phone", "fone", "tel"),
+    ("celular", "whatsapp", "mobile", "cell"),
+    ("email", "e-mail", "mail"),
+    ("obs", "observacao", "observacoes"),
+)
+FILTER_EMPTY_VALUE_LABEL = "(Vazios)"
 DIALOG_NON_CONTACT_WORDS = (
     *DIALOG_NAME_WORDS,
     *DIALOG_EMAIL_WORDS,
@@ -96,6 +142,13 @@ DIALOG_PHONE_PATTERN = re.compile(
     r"(?<!\d)(?:\+?55\s*)?(?:\(?\d{2}\)?[\s.-]*)?(?:9[\s.-]*)?\d{4}[\s.-]?\d{4}(?!\d)"
 )
 DEFAULT_PAGE_SIZE = 500
+HEADER_LOGO_PATH = Path("assets") / "rb_instituto_header_logo.png"
+
+
+def resource_path(relative_path: str | Path) -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / relative_path
+    return Path(__file__).resolve().parents[4] / relative_path
 
 
 class ImportWorker(QObject):
@@ -282,7 +335,7 @@ class InvitationStatusDelegate(QStyledItemDelegate):
         rects = self._action_rects(option.rect)
         self._draw_sent_action(painter, rects["sent"], status == "sent")
         self._draw_pending_action(painter, rects["waiting"], status == "waiting")
-        self._draw_remove_action(painter, rects["remove"])
+        self._draw_not_sent_action(painter, rects["not_sent"], status == "not_sent")
         painter.restore()
 
     def editorEvent(
@@ -326,14 +379,14 @@ class InvitationStatusDelegate(QStyledItemDelegate):
         return {
             "sent": QRect(start_x, y, size, size),
             "waiting": QRect(start_x + size + gap, y, size, size),
-            "remove": QRect(start_x + (size + gap) * 2, y, size, size),
+            "not_sent": QRect(start_x + (size + gap) * 2, y, size, size),
         }
 
     def _action_tooltip(self, action: str) -> str:
         tooltips = {
-            "sent": "Enviado",
-            "waiting": "Em aguardo",
-            "remove": "Remover da lista",
+            "sent": "E-mail enviado",
+            "waiting": "E-mail em aguardo",
+            "not_sent": "E-mail nao enviado",
         }
         return tooltips.get(action, "")
 
@@ -369,10 +422,147 @@ class InvitationStatusDelegate(QStyledItemDelegate):
             dot_size,
         )
 
-    def _draw_remove_action(self, painter: QPainter, rect: QRect) -> None:
+    def _draw_not_sent_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
         painter.setPen(QPen(QColor("#dc3b3b"), 1))
-        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.setBrush(QBrush(QColor("#fff1f2") if active else QColor("#ffffff")))
         painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
+        painter.setPen(QPen(QColor("#dc2626"), 1))
+        painter.drawLine(
+            QPointF(rect.left() + 5, rect.top() + 5),
+            QPointF(rect.right() - 5, rect.bottom() - 5),
+        )
+        painter.drawLine(
+            QPointF(rect.right() - 5, rect.top() + 5),
+            QPointF(rect.left() + 5, rect.bottom() - 5),
+        )
+
+
+class ContactTrackingDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        statuses = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(statuses, dict):
+            super().paint(painter, option, index)
+            return
+
+        view_option = QStyleOptionViewItem(option)
+        self.initStyleOption(view_option, index)
+        view_option.text = ""
+        style = view_option.widget.style() if view_option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, view_option, painter, view_option.widget)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#334155"), 1))
+        painter.drawText(self._label_rect(option.rect), Qt.AlignmentFlag.AlignCenter, "Tel/Cel")
+        rects = self._action_rects(option.rect)
+        status = str(statuses.get("call", "")).casefold()
+        self._draw_done_action(painter, rects["done"], status == "done")
+        self._draw_missed_action(painter, rects["missed"], status == "missed")
+        self._draw_not_done_action(painter, rects["not_done"], status == "not_done")
+        painter.restore()
+
+    def editorEvent(
+        self,
+        event: object,
+        model: object,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return False
+
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        for status, rect in self._action_rects(option.rect).items():
+            if rect.contains(position):
+                return bool(model.setData(index, f"call:{status}", Qt.ItemDataRole.UserRole))
+        return False
+
+    def helpEvent(
+        self,
+        event: object,
+        view: object,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        if event.type() == QEvent.Type.ToolTip and index.isValid():
+            for status, rect in self._action_rects(option.rect).items():
+                if rect.contains(event.pos()):
+                    QToolTip.showText(event.globalPos(), self._action_tooltip(status), view)
+                    return True
+            QToolTip.hideText()
+            return True
+        return super().helpEvent(event, view, option, index)
+
+    def _layout_parts(self, cell_rect: QRect) -> tuple[int, int, int, int]:
+        size = 17
+        gap = 7
+        label_width = 50
+        total_width = label_width + size * 3 + gap * 2
+        start_x = cell_rect.x() + max((cell_rect.width() - total_width) // 2, 2)
+        y = cell_rect.y() + max((cell_rect.height() - size) // 2, 0)
+        return start_x, y, size, gap
+
+    def _label_rect(self, cell_rect: QRect) -> QRect:
+        x, y, size, _ = self._layout_parts(cell_rect)
+        return QRect(x, y - 1, 50, size + 2)
+
+    def _action_rects(self, cell_rect: QRect) -> dict[str, QRect]:
+        x, y, size, gap = self._layout_parts(cell_rect)
+        start_x = x + 50
+        return {
+            "done": QRect(start_x, y, size, size),
+            "missed": QRect(start_x + size + gap, y, size, size),
+            "not_done": QRect(start_x + (size + gap) * 2, y, size, size),
+        }
+
+    def _action_tooltip(self, status: str) -> str:
+        tooltips = {
+            "done": "Contato por telefone/celular efetuado",
+            "missed": "Não atendeu telefone/celular",
+            "not_done": "Contato por telefone/celular não efetuado",
+        }
+        return tooltips.get(status, "")
+
+    def _draw_done_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        painter.setPen(QPen(QColor("#22a35a"), 1))
+        painter.setBrush(QBrush(QColor("#effaf3") if active else QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
+        painter.setPen(QPen(QColor("#168344"), 1))
+        painter.drawLine(
+            QPointF(rect.left() + 4, rect.center().y()),
+            QPointF(rect.left() + 7, rect.bottom() - 5),
+        )
+        painter.drawLine(
+            QPointF(rect.left() + 7, rect.bottom() - 5),
+            QPointF(rect.right() - 4, rect.top() + 4),
+        )
+
+    def _draw_missed_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        painter.setPen(QPen(QColor("#d8a300"), 1))
+        painter.setBrush(QBrush(QColor("#fff8df") if active else QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#e4ad00")))
+        dot_size = 6
+        painter.drawEllipse(
+            rect.x() + (rect.width() - dot_size) // 2,
+            rect.y() + (rect.height() - dot_size) // 2,
+            dot_size,
+            dot_size,
+        )
+
+    def _draw_not_done_action(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        painter.setPen(QPen(QColor("#dc3b3b"), 1))
+        painter.setBrush(QBrush(QColor("#fff1f2") if active else QColor("#ffffff")))
+        painter.drawRoundedRect(rect, 4, 4)
+        if not active:
+            return
         painter.setPen(QPen(QColor("#dc2626"), 1))
         painter.drawLine(
             QPointF(rect.left() + 5, rect.top() + 5),
@@ -401,14 +591,23 @@ class MainWindow(QMainWindow):
         self._imports: list[ImportSummaryDTO] = []
         self._available_columns: tuple[str, ...] = tuple()
         self._visible_columns_by_context: dict[str, set[str]] = {}
+        self._hidden_system_columns_by_context: dict[str, set[str]] = {}
+        self._forced_visible_columns_by_context: dict[str, list[str]] = {}
+        self._table_column_order_by_context: dict[str, list[str]] = {}
+        self._table_column_value_filters_by_context: dict[str, dict[str, set[str]]] = {}
+        self._restoring_table_header_layout = False
         self._filter_options_context_key: tuple[object, ...] | None = None
         self._filter_controls_updating = False
         self._quick_column_filters: set[str] = set()
         self._selected_category_filters: set[str] = set()
         self._selected_location_filters: set[str] = set()
+        self._grouped_filter_kind: str | None = None
+        self._grouped_filter_source_columns: tuple[str, ...] = tuple()
+        self._grouped_filter_groups_by_key: dict[str, GuestGroupDTO] = {}
+        self._marked_filter_group_keys: set[str] = set()
         self._duplicates_count_value = 0
         self._marked_guest_ids: set[int] = set()
-        self._table_model: GuestTableModel | None = None
+        self._table_model: GuestTableModel | GroupedGuestTableModel | None = None
         self._import_thread: QThread | None = None
         self._import_worker: ImportWorker | None = None
         self._search_timer = QTimer(self)
@@ -446,13 +645,18 @@ class MainWindow(QMainWindow):
         header.setObjectName("Header")
         layout = QHBoxLayout(header)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(16)
+
+        logo_label = self._build_header_logo(header)
+        if logo_label is not None:
+            layout.addWidget(logo_label)
 
         title_box = QVBoxLayout()
-        title = QLabel("Mala Direta -  Instituto Ricardo Brennand")
+        title = QLabel("Mala Direta")
         title.setObjectName("Title")
-        subtitle = QLabel("Arquivos Excel são unificados automaticamente; selecione convidados e exporte a lista final.")
+        subtitle = QLabel("Instituto Ricardo Brennand | Arquivos Excel são unificados automaticamente; selecione convidados e exporte a lista final.")
         subtitle.setObjectName("Subtitle")
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         layout.addLayout(title_box, 1)
@@ -478,6 +682,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.options_button)
 
         return header
+
+    def _build_header_logo(self, parent: QWidget) -> QLabel | None:
+        pixmap = QPixmap(str(resource_path(HEADER_LOGO_PATH)))
+        if pixmap.isNull():
+            return None
+
+        label = QLabel(parent)
+        label.setObjectName("HeaderLogo")
+        label.setFixedSize(250, 72)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setPixmap(
+            pixmap.scaled(
+                label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        return label
 
     def _build_workbook_tabs(self) -> QFrame:
         frame = QFrame()
@@ -516,6 +738,11 @@ class MainWindow(QMainWindow):
         self.column_filter_button.setMinimumWidth(120)
         self.column_filter_button.clicked.connect(self._show_column_filter_menu)
         layout.addWidget(self.column_filter_button)
+
+        self.create_column_button = QPushButton("Criar coluna", frame)
+        self.create_column_button.setObjectName("CompactButton")
+        self.create_column_button.clicked.connect(self._create_column)
+        layout.addWidget(self.create_column_button)
 
         self.select_page_button = QPushButton("Marcar pág.", frame)
         self.select_page_button.setObjectName("CompactButton")
@@ -616,12 +843,21 @@ class MainWindow(QMainWindow):
             | QAbstractItemView.EditTrigger.EditKeyPressed
             | QAbstractItemView.EditTrigger.AnyKeyPressed
         )
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        table.horizontalHeader().setDefaultSectionSize(170)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setDefaultSectionSize(170)
+        header.setSectionsClickable(True)
+        header.setSectionsMovable(True)
+        header.setFirstSectionMovable(True)
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.sectionMoved.connect(self._on_table_header_section_moved)
+        header.sectionClicked.connect(self._show_table_header_filter_menu)
+        header.customContextMenuRequested.connect(self._show_table_header_context_menu)
         table.verticalHeader().setDefaultSectionSize(28)
         table.setTextElideMode(Qt.TextElideMode.ElideRight)
         table.setWordWrap(True)
         table.clicked.connect(self._on_table_clicked)
+        table.doubleClicked.connect(self._on_table_double_clicked)
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_table_context_menu)
         table.setItemDelegateForColumn(0, CircleCheckDelegate(table))
@@ -666,6 +902,10 @@ class MainWindow(QMainWindow):
             }
             QLabel#Subtitle {
                 color: #607089;
+            }
+            QLabel#HeaderLogo {
+                background: transparent;
+                border: none;
             }
             QLabel#SmallLabel {
                 color: #52647d;
@@ -955,19 +1195,30 @@ class MainWindow(QMainWindow):
         self._load_workbooks(preferred_workbook_id=result.workbook_id)
 
     def _registration_categories(self) -> tuple[str, ...]:
+        categories = list(DEFAULT_REGISTRATION_CATEGORIES)
         try:
             options = self._view_model.load_filter_options(
                 import_id=None,
                 workbook_id=self._current_workbook_id,
             )
-            hidden_categories = {"outros - riomar"}
-            return tuple(
-                category
-                for category in options.categories
-                if self._normalize_dialog_text(category) not in hidden_categories
-            )
+            categories.extend(options.categories)
         except Exception:
-            return tuple()
+            pass
+
+        hidden_categories = {
+            self._normalize_dialog_text(category)
+            for category in HIDDEN_REGISTRATION_CATEGORIES
+        }
+        unique_categories: list[str] = []
+        seen: set[str] = set()
+        for category in categories:
+            clean_category = str(category or "").strip()
+            normalized_category = self._normalize_dialog_text(clean_category)
+            if not clean_category or normalized_category in hidden_categories or normalized_category in seen:
+                continue
+            unique_categories.append(clean_category.upper())
+            seen.add(normalized_category)
+        return tuple(unique_categories)
 
     def _load_workbooks(self, preferred_workbook_id: int | None = None) -> None:
         workbooks = self._view_model.list_workbooks()
@@ -1043,6 +1294,7 @@ class MainWindow(QMainWindow):
         self._reset_filter_inputs()
         self._filter_options_context_key = None
         self._marked_guest_ids.clear()
+        self._table_column_value_filters_by_context.clear()
         self._current_page = 0
         self._load_sheet_tabs()
 
@@ -1166,6 +1418,8 @@ class MainWindow(QMainWindow):
             return
         self._quick_column_filters = selected_filters
         self._current_search = ""
+        self._marked_guest_ids.clear()
+        self._marked_filter_group_keys.clear()
         self._filter_controls_updating = True
         self.search_input.clear()
         self._selected_category_filters.clear()
@@ -1409,6 +1663,85 @@ class MainWindow(QMainWindow):
                 return clean_item
         return ""
 
+    def _should_show_grouped_quick_filter(
+        self,
+        selected_only: bool,
+        duplicates_only: bool,
+    ) -> bool:
+        if selected_only or duplicates_only:
+            return False
+        if not self._current_sheet_selectable:
+            return False
+        active_filters = self._active_quick_filter_kinds()
+        return len(active_filters) == 1 and active_filters[0] in {"name", "category", "location"}
+
+    def _grouped_filter_header_label(self, filter_kind: str) -> str:
+        labels = {
+            "name": "Nome",
+            "category": "Categoria",
+            "location": "Estado/Cidade",
+        }
+        return labels.get(filter_kind, "Filtro")
+
+    def _build_grouped_filter_groups(
+        self,
+        rows: list[GuestRowDTO],
+        columns: tuple[str, ...],
+        filter_kind: str,
+    ) -> list[GuestGroupDTO]:
+        matching_columns = tuple(
+            column_name
+            for column_name in columns
+            if self._matches_quick_filter_kind_column(column_name, filter_kind)
+        )
+        if not matching_columns:
+            return []
+
+        labels_by_key: dict[str, str] = {}
+        rows_by_key: dict[str, list[GuestRowDTO]] = {}
+        for row in rows:
+            for group_value in self._group_values_for_row(row, matching_columns):
+                group_key = self._normalize_dialog_text(group_value)
+                if not group_key:
+                    continue
+                labels_by_key.setdefault(group_key, group_value.upper())
+                rows_by_key.setdefault(group_key, []).append(row)
+
+        return [
+            GuestGroupDTO(
+                key=group_key,
+                label=labels_by_key[group_key],
+                rows=tuple(group_rows),
+            )
+            for group_key, group_rows in sorted(
+                rows_by_key.items(),
+                key=lambda item: (
+                    self._normalize_dialog_text(labels_by_key[item[0]]),
+                    labels_by_key[item[0]],
+                ),
+            )
+        ]
+
+    def _group_values_for_row(
+        self,
+        row: GuestRowDTO,
+        columns: tuple[str, ...],
+    ) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for column_name in columns:
+            raw_value = str(row.data.get(column_name, ""))
+            for item in raw_value.replace("\r", "\n").split("\n"):
+                clean_item = item.strip()
+                if not clean_item:
+                    continue
+                normalized_item = self._normalize_dialog_text(clean_item)
+                if normalized_item in seen:
+                    continue
+                values.append(clean_item)
+                seen.add(normalized_item)
+        return values
+
     def _apply_column_filter(
         self,
         columns: tuple[str, ...],
@@ -1542,6 +1875,7 @@ class MainWindow(QMainWindow):
             self._current_import_id = tab_data["import_id"]
             self._current_sheet_selectable = bool(tab_data["selectable"])
         self._marked_guest_ids.clear()
+        self._table_column_value_filters_by_context.pop(self._column_filter_context_key(), None)
         self._current_page = 0
         self._load_table()
 
@@ -1553,7 +1887,10 @@ class MainWindow(QMainWindow):
         if self._filter_controls_updating:
             return
         has_workspace = self._current_workbook_id is not None or self._automatic_mode or self._duplicates_mode
-        self.clear_search_button.setEnabled(has_workspace and bool(self.search_input.text().strip()))
+        self.clear_search_button.setEnabled(
+            has_workspace
+            and (bool(self.search_input.text().strip()) or bool(self._active_table_column_value_filters()))
+        )
         self._search_timer.start()
 
     def _apply_live_search(self) -> None:
@@ -1575,11 +1912,16 @@ class MainWindow(QMainWindow):
         self._load_table()
 
     def _clear_search(self) -> None:
+        had_column_filters = bool(self._active_table_column_value_filters())
         self._filter_controls_updating = True
         self.search_input.clear()
         self._filter_controls_updating = False
         self._search_timer.stop()
+        self._table_column_value_filters_by_context.pop(self._column_filter_context_key(), None)
+        previous_search = self._current_search
         self._apply_search_text()
+        if had_column_filters and not previous_search:
+            self._load_table()
 
     def _combined_filter_search(self) -> str:
         return self.search_input.text().strip()
@@ -1604,6 +1946,7 @@ class MainWindow(QMainWindow):
         self._quick_column_filters.clear()
         self._selected_category_filters.clear()
         self._selected_location_filters.clear()
+        self._marked_filter_group_keys.clear()
         if hasattr(self, "category_filter_combo"):
             self.category_filter_combo.setCurrentIndex(0)
         if hasattr(self, "location_filter_combo"):
@@ -1719,11 +2062,34 @@ class MainWindow(QMainWindow):
         self._refresh_filter_options(import_id, workbook_id, selected_only, duplicates_only)
 
         try:
+            has_column_value_filters = bool(self._active_table_column_value_filters())
+            if self._should_show_grouped_quick_filter(selected_only, duplicates_only):
+                active_filter = self._active_quick_filter_kinds()[0]
+                page = self._view_model.load_guests(
+                    import_id=import_id,
+                    workbook_id=workbook_id,
+                    page=0,
+                    page_size=5000,
+                    search=self._current_search,
+                    selected_only=selected_only,
+                    duplicates_only=duplicates_only,
+                )
+                groups = self._build_grouped_filter_groups(page.rows, page.columns, active_filter)
+                self._current_page = 0
+                self._set_grouped_filter_page(
+                    groups=groups,
+                    filter_kind=active_filter,
+                    source_columns=page.columns,
+                    source_total_rows=page.total_rows,
+                    selected_rows=page.selected_rows,
+                )
+                return
+
             page = self._view_model.load_guests(
                 import_id=import_id,
                 workbook_id=workbook_id,
-                page=self._current_page,
-                page_size=DEFAULT_PAGE_SIZE,
+                page=0 if has_column_value_filters else self._current_page,
+                page_size=5000 if has_column_value_filters else DEFAULT_PAGE_SIZE,
                 search=self._current_search,
                 selected_only=selected_only,
                 duplicates_only=duplicates_only,
@@ -1751,10 +2117,23 @@ class MainWindow(QMainWindow):
         selected_rows: int,
         page_size: int,
     ) -> None:
+        self._grouped_filter_kind = None
+        self._grouped_filter_source_columns = tuple()
+        self._grouped_filter_groups_by_key = {}
+        self._marked_filter_group_keys.clear()
         self._total_rows = total_rows
         self._selected_rows = selected_rows
         self._page_size = page_size
         rows = self._apply_quick_row_filter(rows, columns)
+        rows = self._apply_table_column_value_filters(rows)
+        if self._active_table_column_value_filters():
+            self._current_page = 0
+            total_rows = len(rows)
+            page_size = max(len(rows), 1)
+            self._total_rows = total_rows
+            self._page_size = page_size
+        columns, editable_columns = self._include_forced_visible_columns(rows, columns, editable_columns)
+        columns, editable_columns = self._order_columns_for_display(columns, editable_columns)
         columns, editable_columns = self._apply_column_filter(columns, editable_columns)
         self._table_model = GuestTableModel(
             rows,
@@ -1766,25 +2145,228 @@ class MainWindow(QMainWindow):
             highlight_selected_rows=not self._automatic_mode,
             automatic_mode=self._automatic_mode,
             invitation_status_changed=self._on_invitation_status_changed,
-            automatic_remove_requested=self._remove_guest_from_automatic,
+            contact_status_changed=self._on_contact_status_changed,
         )
+        self.table.setUpdatesEnabled(False)
         self.table.setModel(self._table_model)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        for logical_column in range(self._table_model.columnCount()):
+            self.table.setItemDelegateForColumn(logical_column, QStyledItemDelegate(self.table))
+            self.table.setColumnHidden(logical_column, False)
         if self._automatic_mode:
-            self.table.setItemDelegateForColumn(0, InvitationStatusDelegate(self.table))
-            self.table.setColumnWidth(0, 120)
+            selection_column = self._table_model.system_column_index("selection")
+            tracking_column = self._table_model.system_column_index("contact_tracking")
+            if selection_column is not None:
+                self.table.setItemDelegateForColumn(selection_column, InvitationStatusDelegate(self.table))
+                self.table.setColumnWidth(selection_column, 120)
+            if tracking_column is not None:
+                self.table.setItemDelegateForColumn(tracking_column, ContactTrackingDelegate(self.table))
+                self.table.setColumnWidth(tracking_column, 150)
+            self.table.verticalHeader().setDefaultSectionSize(34)
         else:
-            self.table.setItemDelegateForColumn(0, CircleCheckDelegate(self.table))
-            self.table.setColumnWidth(0, 110)
-        self.table.setColumnWidth(1, 95)
-        self.table.setColumnWidth(2, 120)
-        if self.table.model() is not None and self.table.model().columnCount() > 3:
-            self.table.setColumnWidth(3, 190)
+            selection_column = self._table_model.system_column_index("selection")
+            if selection_column is not None:
+                self.table.setItemDelegateForColumn(selection_column, CircleCheckDelegate(self.table))
+                self.table.setColumnWidth(selection_column, 110)
+            self.table.verticalHeader().setDefaultSectionSize(28)
+        code_column = self._table_model.system_column_index("code")
+        duplicate_column = self._table_model.system_column_index("duplicate")
+        if code_column is not None:
+            self.table.setColumnWidth(code_column, 95)
+        if duplicate_column is not None:
+            self.table.setColumnWidth(duplicate_column, 120)
+        first_data_column = self._first_data_table_column()
+        if first_data_column is not None:
+            self.table.setColumnWidth(first_data_column, 190)
+        self._apply_default_table_column_widths()
         if self._table_model.has_multiline_cells():
             self.table.resizeRowsToContents()
+        self._restore_table_header_layout()
+        self._apply_hidden_system_columns()
+        self.table.setUpdatesEnabled(True)
         self._position_table_send_button()
         self._update_filter_button_text(columns)
         self._update_page_label()
         self._update_actions()
+
+    def _set_grouped_filter_page(
+        self,
+        groups: list[GuestGroupDTO],
+        filter_kind: str,
+        source_columns: tuple[str, ...],
+        source_total_rows: int,
+        selected_rows: int,
+    ) -> None:
+        groups = self._apply_grouped_column_value_filters(groups)
+        self._grouped_filter_kind = filter_kind
+        self._grouped_filter_source_columns = source_columns
+        self._grouped_filter_groups_by_key = {group.key: group for group in groups}
+        self._marked_filter_group_keys.intersection_update(self._grouped_filter_groups_by_key)
+        self._rebuild_group_marked_guest_ids()
+
+        self._total_rows = len(groups)
+        self._selected_rows = selected_rows
+        self._page_size = max(len(groups), 1)
+        self._available_columns = tuple()
+
+        self._table_model = GroupedGuestTableModel(
+            groups,
+            self._grouped_filter_header_label(filter_kind),
+            self._marked_filter_group_keys,
+            self._on_filter_group_selection_changed,
+        )
+        self.table.setUpdatesEnabled(False)
+        self.table.setModel(self._table_model)
+        for logical_column in range(self._table_model.columnCount()):
+            self.table.setItemDelegateForColumn(logical_column, QStyledItemDelegate(self.table))
+            self.table.setColumnHidden(logical_column, False)
+        self.table.setItemDelegateForColumn(0, CircleCheckDelegate(self.table))
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setColumnWidth(0, 115)
+        self.table.setColumnWidth(1, 280)
+        self.table.setColumnWidth(2, 120)
+        self.table.setUpdatesEnabled(True)
+        self._position_table_send_button()
+        self._update_filter_button_text(tuple())
+        self._update_grouped_page_label(source_total_rows)
+        self._update_actions()
+
+    def _update_grouped_page_label(self, source_total_rows: int) -> None:
+        label = self._grouped_filter_header_label(self._grouped_filter_kind or "")
+        if self._total_rows == 0:
+            self.page_label.setText(f"Nenhum grupo encontrado por {label}")
+            return
+        self.page_label.setText(
+            f"Resumo por {label}: {self._total_rows} grupos | "
+            f"{source_total_rows} registros analisados | Lista final: {self._selected_rows}"
+        )
+
+    def _is_grouped_filter_mode(self) -> bool:
+        return isinstance(self._table_model, GroupedGuestTableModel)
+
+    def _active_table_column_value_filters(self) -> dict[str, set[str]]:
+        return self._table_column_value_filters_by_context.get(
+            self._column_filter_context_key(),
+            {},
+        )
+
+    def _set_table_column_value_filter(self, column_identifier: str, values: set[str] | None) -> None:
+        context_key = self._column_filter_context_key()
+        filters = dict(self._table_column_value_filters_by_context.get(context_key, {}))
+        if values:
+            filters[column_identifier] = values
+        else:
+            filters.pop(column_identifier, None)
+
+        if filters:
+            self._table_column_value_filters_by_context[context_key] = filters
+        else:
+            self._table_column_value_filters_by_context.pop(context_key, None)
+
+    def _apply_table_column_value_filters(self, rows: list[GuestRowDTO]) -> list[GuestRowDTO]:
+        filters = {
+            column_identifier: values
+            for column_identifier, values in self._active_table_column_value_filters().items()
+            if column_identifier.startswith(("data:", "system:"))
+        }
+        if not filters:
+            return rows
+
+        return [
+            row
+            for row in rows
+            if all(
+                self._row_matches_column_value_filter(row, column_identifier, values)
+                for column_identifier, values in filters.items()
+            )
+        ]
+
+    def _apply_grouped_column_value_filters(self, groups: list[GuestGroupDTO]) -> list[GuestGroupDTO]:
+        filters = {
+            column_identifier: values
+            for column_identifier, values in self._active_table_column_value_filters().items()
+            if column_identifier.startswith("group:")
+        }
+        if not filters:
+            return groups
+
+        return [
+            group
+            for group in groups
+            if all(
+                bool(set(self._filter_values_for_group(group, column_identifier)).intersection(values))
+                for column_identifier, values in filters.items()
+            )
+        ]
+
+    def _row_matches_column_value_filter(
+        self,
+        row: GuestRowDTO,
+        column_identifier: str,
+        allowed_values: set[str],
+    ) -> bool:
+        return bool(set(self._filter_values_for_row(row, column_identifier)).intersection(allowed_values))
+
+    def _filter_values_for_row(self, row: GuestRowDTO, column_identifier: str) -> list[str]:
+        if column_identifier == "system:selection":
+            if self._automatic_mode:
+                invitation_status_labels = {
+                    "sent": "E-mail enviado",
+                    "waiting": "E-mail em aguardo",
+                    "not_sent": "E-mail nao enviado",
+                    "pending": FILTER_EMPTY_VALUE_LABEL,
+                }
+                return [
+                    invitation_status_labels.get(
+                        str(row.invitation_status or "").strip().casefold(),
+                        FILTER_EMPTY_VALUE_LABEL,
+                    )
+                ]
+            return ["Marcado" if row.selected or row.id in self._marked_guest_ids else "Nao marcado"]
+        if column_identifier == "system:duplicate":
+            return [self._format_duplicate_label(row) or FILTER_EMPTY_VALUE_LABEL]
+        if column_identifier == "system:contact_tracking":
+            status = str(row.contact_statuses.get("phone") or row.contact_statuses.get("mobile") or "").strip()
+            status_labels = {
+                "done": "Contato efetuado",
+                "missed": "Nao atendeu",
+                "not_done": "Contato nao efetuado",
+            }
+            return [status_labels.get(status, FILTER_EMPTY_VALUE_LABEL)]
+        if column_identifier.startswith("data:"):
+            column_name = column_identifier.split(":", 1)[1]
+            return self._split_filter_cell_values(row.data.get(column_name, ""))
+        return [FILTER_EMPTY_VALUE_LABEL]
+
+    def _filter_values_for_group(self, group: GuestGroupDTO, column_identifier: str) -> list[str]:
+        if column_identifier == "group:selection":
+            return ["Marcado" if group.key in self._marked_filter_group_keys else "Nao marcado"]
+        if column_identifier == "group:value":
+            return [group.label or FILTER_EMPTY_VALUE_LABEL]
+        if column_identifier == "group:quantity":
+            return [str(group.quantity)]
+        return [FILTER_EMPTY_VALUE_LABEL]
+
+    def _split_filter_cell_values(self, value: object) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for item in str(value or "").replace("\r", "\n").split("\n"):
+            clean_item = item.strip()
+            normalized_item = self._normalize_dialog_text(clean_item)
+            if not clean_item or normalized_item in seen:
+                continue
+            values.append(clean_item.upper())
+            seen.add(normalized_item)
+        return values or [FILTER_EMPTY_VALUE_LABEL]
+
+    def _first_data_table_column(self) -> int | None:
+        if self._table_model is None:
+            return None
+        for logical_column in range(self._table_model.columnCount()):
+            if self._table_model.data_column_name(logical_column) is not None:
+                return logical_column
+        return None
 
     def _update_page_label(self) -> None:
         if self._total_rows == 0:
@@ -1834,6 +2416,37 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao selecionar", str(exc))
 
+    def _on_filter_group_selection_changed(self, group_key: str, selected: bool) -> None:
+        if selected:
+            self._marked_filter_group_keys.add(group_key)
+        else:
+            self._marked_filter_group_keys.discard(group_key)
+
+        self._rebuild_group_marked_guest_ids()
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            self._table_model.refresh_selection_states()
+        self.status_label.setText(f"{len(self._marked_guest_ids)} registros marcados para envio.")
+        self._update_actions()
+
+    def _rebuild_group_marked_guest_ids(self) -> None:
+        if not self._grouped_filter_groups_by_key:
+            return
+
+        grouped_guest_ids = {
+            row.id
+            for group in self._grouped_filter_groups_by_key.values()
+            for row in group.rows
+        }
+        self._marked_guest_ids.difference_update(grouped_guest_ids)
+
+        for group_key in self._marked_filter_group_keys:
+            group = self._grouped_filter_groups_by_key.get(group_key)
+            if group is None:
+                continue
+            for row in group.rows:
+                if row.selectable and not row.selected:
+                    self._marked_guest_ids.add(row.id)
+
     def _select_guest_for_automatic(self, guest_id: int) -> int | None:
         selected_guest_id = guest_id
         if not self._automatic_mode:
@@ -1865,6 +2478,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._marked_guest_ids.clear()
+        self._marked_filter_group_keys.clear()
         updated_rows = self._view_model.set_page_selected(unique_guest_ids, True)
         self._refresh_automatic_tab_label()
         self.status_label.setText(f"{updated_rows} registros enviados para a Planilha automática.")
@@ -1937,7 +2551,7 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(select_all_checkbox)
         layout.addLayout(filter_layout)
 
-        table = QTableWidget(len(review_rows), 12)
+        table = QTableWidget(len(review_rows), 11)
         table.setItemDelegateForColumn(0, CircleCheckDelegate(table))
         table.setHorizontalHeaderLabels(
             [
@@ -1945,7 +2559,6 @@ class MainWindow(QMainWindow):
                 "Item",
                 "Situação",
                 "Código",
-                "Duplicidade",
                 "Lista",
                 "Nome",
                 "Telefone",
@@ -1975,7 +2588,6 @@ class MainWindow(QMainWindow):
                 str(review_row["item"]),
                 str(review_row["status"]),
                 candidate.verification_code,
-                self._format_duplicate_label(candidate),
                 candidate.sheet_name,
                 self._guest_value_by_headers(candidate, DIALOG_NAME_WORDS),
                 self._guest_phone_value(candidate),
@@ -2001,11 +2613,6 @@ class MainWindow(QMainWindow):
                     item.setData(candidate_role, candidate.id)
                     item.setData(group_role, review_row["group"])
                 elif column_index == 2 and str(review_row["status"]).startswith("Duplicidade"):
-                    item.setForeground(QBrush(QColor("#9a4d00")))
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                elif column_index == 4 and candidate.duplicate_count > 1:
                     item.setForeground(QBrush(QColor("#9a4d00")))
                     font = item.font()
                     font.setBold(True)
@@ -2104,17 +2711,202 @@ class MainWindow(QMainWindow):
         table.setColumnWidth(1, 60)
         table.setColumnWidth(2, 150)
         table.setColumnWidth(3, 90)
-        table.setColumnWidth(4, 120)
-        table.setColumnWidth(5, 140)
-        table.setColumnWidth(6, 240)
+        table.setColumnWidth(4, 140)
+        table.setColumnWidth(5, 240)
+        table.setColumnWidth(6, 130)
         table.setColumnWidth(7, 130)
-        table.setColumnWidth(8, 130)
-        table.setColumnWidth(9, 190)
-        table.setColumnWidth(10, 110)
+        table.setColumnWidth(8, 190)
+        table.setColumnWidth(9, 110)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return checked_candidate_ids()
+
+    def _show_filter_group_detail_dialog(self, group: GuestGroupDTO) -> None:
+        rows = list(group.rows)
+        if not rows:
+            return
+
+        columns = self._grouped_filter_source_columns
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{self._grouped_filter_header_label(self._grouped_filter_kind or '')}: {group.label}")
+        dialog.resize(1500, 650)
+        layout = QVBoxLayout(dialog)
+
+        message = QLabel("Marque os contatos deste grupo que deseja enviar para a Planilha automatica.")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(8)
+        filter_layout.addWidget(QLabel("Filtro"))
+
+        search_input = QLineEdit(dialog)
+        search_input.setPlaceholderText("Buscar dentro deste grupo")
+        search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        filter_layout.addWidget(search_input, 1)
+
+        select_all_checkbox = QCheckBox("Selecionar visiveis", dialog)
+        filter_layout.addWidget(select_all_checkbox)
+        layout.addLayout(filter_layout)
+
+        headers = ["Enviar", "Situacao", *columns]
+        table = QTableWidget(len(rows), len(headers), dialog)
+        table.setItemDelegateForColumn(0, CircleCheckDelegate(table))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+
+        guest_id_role = Qt.ItemDataRole.UserRole
+        selectable_role = Qt.ItemDataRole.UserRole + 1
+
+        table.blockSignals(True)
+        for row_index, row in enumerate(rows):
+            can_send = row.selectable and not row.selected
+            status = "Pronto para enviar" if can_send else "Ja esta na lista final"
+            values = ["", status]
+            values.extend(str(row.data.get(column_name, "")) for column_name in columns)
+
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                if column_index == 0:
+                    flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    if can_send:
+                        flags |= Qt.ItemFlag.ItemIsUserCheckable
+                    item.setFlags(flags)
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    item.setData(guest_id_role, row.id)
+                    item.setData(selectable_role, can_send)
+                elif column_index == 1 and not can_send:
+                    item.setForeground(QBrush(QColor("#64748b")))
+                table.setItem(row_index, column_index, item)
+        table.blockSignals(False)
+        layout.addWidget(table, 1)
+
+        def row_matches_search(table_row: int, search_text: str) -> bool:
+            if not search_text:
+                return True
+            row_text = " ".join(
+                str(table.item(table_row, column_index).text())
+                for column_index in range(table.columnCount())
+                if table.item(table_row, column_index) is not None
+            ).casefold()
+            return search_text in row_text
+
+        def apply_group_filter() -> None:
+            search_text = search_input.text().strip().casefold()
+            for table_row in range(table.rowCount()):
+                table.setRowHidden(table_row, not row_matches_search(table_row, search_text))
+            update_select_all_checkbox()
+
+        def set_visible_rows_checked(checked: bool) -> None:
+            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            table.blockSignals(True)
+            for table_row in range(table.rowCount()):
+                if table.isRowHidden(table_row):
+                    continue
+                item = table.item(table_row, 0)
+                if item is None or not bool(item.data(selectable_role)):
+                    continue
+                item.setCheckState(state)
+            table.blockSignals(False)
+            table.viewport().update()
+            update_select_all_checkbox()
+
+        def update_select_all_checkbox() -> None:
+            visible_selectable_rows = 0
+            checked_rows = 0
+            for table_row in range(table.rowCount()):
+                if table.isRowHidden(table_row):
+                    continue
+                item = table.item(table_row, 0)
+                if item is None or not bool(item.data(selectable_role)):
+                    continue
+                visible_selectable_rows += 1
+                if item.checkState() == Qt.CheckState.Checked:
+                    checked_rows += 1
+
+            select_all_checkbox.blockSignals(True)
+            select_all_checkbox.setChecked(
+                visible_selectable_rows > 0 and checked_rows == visible_selectable_rows
+            )
+            select_all_checkbox.blockSignals(False)
+
+        def checked_guest_ids() -> list[int]:
+            guest_ids: list[int] = []
+            for table_row in range(table.rowCount()):
+                item = table.item(table_row, 0)
+                if (
+                    item is None
+                    or not bool(item.data(selectable_role))
+                    or item.checkState() != Qt.CheckState.Checked
+                ):
+                    continue
+                guest_ids.append(int(item.data(guest_id_role)))
+            return guest_ids
+
+        search_input.textChanged.connect(apply_group_filter)
+        select_all_checkbox.toggled.connect(set_visible_rows_checked)
+        table.itemChanged.connect(lambda _item: update_select_all_checkbox())
+        update_select_all_checkbox()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Enviar marcados")
+        if cancel_button is not None:
+            cancel_button.setText("Cancelar")
+
+        def accept_if_valid() -> None:
+            if not checked_guest_ids():
+                QMessageBox.information(
+                    dialog,
+                    "Enviar grupo",
+                    "Marque pelo menos um contato para enviar.",
+                )
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_if_valid)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        table.resizeColumnsToContents()
+        table.resizeRowsToContents()
+        table.setColumnWidth(0, 76)
+        table.setColumnWidth(1, 150)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._send_filter_group_guest_ids(checked_guest_ids())
+
+    def _send_filter_group_guest_ids(self, guest_ids: list[int]) -> None:
+        unique_guest_ids = self._unique_guest_ids(guest_ids)
+        if not unique_guest_ids:
+            return
+        if not self._confirm_batch_automatic_conflicts(unique_guest_ids):
+            return
+
+        try:
+            updated_rows = self._view_model.set_page_selected(unique_guest_ids, True)
+            self._marked_guest_ids.difference_update(unique_guest_ids)
+            self._marked_filter_group_keys.clear()
+            self._refresh_automatic_tab_label()
+            self.status_label.setText(f"{updated_rows} registros enviados para a Planilha automatica.")
+            self._load_table()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao enviar grupo", str(exc))
 
     def _confirm_batch_automatic_conflicts(self, guest_ids: list[int]) -> bool:
         conflicts: list[GuestRowDTO] = []
@@ -2171,6 +2963,12 @@ class MainWindow(QMainWindow):
     def _table_rows_by_guest_id(self) -> dict[int, GuestRowDTO]:
         if self._table_model is None:
             return {}
+
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            return {
+                row.id: row
+                for row in self._table_model.all_guest_rows()
+            }
 
         rows: dict[int, GuestRowDTO] = {}
         for row_index in range(self._table_model.rowCount()):
@@ -2479,11 +3277,40 @@ class MainWindow(QMainWindow):
     def _on_invitation_status_changed(self, guest_id: int, status: str) -> bool:
         try:
             self._view_model.set_automatic_guest_status(guest_id, status)
-            message = "Convite marcado como enviado." if status == "sent" else "Convite marcado em aguardo."
+            messages = {
+                "sent": "E-mail marcado como enviado.",
+                "waiting": "E-mail marcado em aguardo.",
+                "not_sent": "E-mail marcado como nao enviado.",
+            }
+            message = messages.get(status, "Status do e-mail atualizado.")
             self.status_label.setText(message)
             return True
         except Exception as exc:
             QMessageBox.critical(self, "Erro ao atualizar convite", str(exc))
+            return False
+
+    def _on_contact_status_changed(self, guest_id: int, channel: str, status: str) -> bool:
+        try:
+            self._view_model.set_automatic_contact_status(guest_id, channel, status)
+            messages = {
+                ("call", "done"): "Tel/Cel marcado como contato efetuado.",
+                ("call", "missed"): "Tel/Cel marcado como não atendido.",
+                ("call", "not_done"): "Tel/Cel marcado como contato não efetuado.",
+                ("call", ""): "Tel/Cel limpo.",
+                ("phone", "done"): "Telefone marcado como contato efetuado.",
+                ("phone", "not_done"): "Telefone marcado como contato não efetuado.",
+                ("phone", ""): "Telefone limpo.",
+                ("mobile", "done"): "Celular marcado como contato efetuado.",
+                ("mobile", "not_done"): "Celular marcado como contato não efetuado.",
+                ("mobile", ""): "Celular limpo.",
+                ("email", "done"): "E-mail marcado como enviado.",
+                ("email", "not_done"): "E-mail marcado como não enviado.",
+                ("email", ""): "E-mail limpo.",
+            }
+            self.status_label.setText(messages.get((channel, status), "Acompanhamento atualizado."))
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao atualizar acompanhamento", str(exc))
             return False
 
     def _remove_guest_from_automatic(self, guest_id: int) -> bool:
@@ -2500,10 +3327,26 @@ class MainWindow(QMainWindow):
     def _on_table_clicked(self, index: QModelIndex) -> None:
         if not index.isValid() or self._table_model is None:
             return
-        if index.column() == 0:
+        if self._is_grouped_filter_mode():
             return
-        if index.column() == 2:
+        column_identifier = self._table_model.column_identifier(index.column())
+        if column_identifier in {"system:selection", "system:contact_tracking"}:
+            return
+        if column_identifier == "system:duplicate":
             self._show_duplicate_candidates_for_row(index.row())
+
+    def _on_table_double_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid() or not isinstance(self._table_model, GroupedGuestTableModel):
+            return
+
+        column_identifier = self._table_model.column_identifier(index.column())
+        if column_identifier not in {"group:value", "group:quantity"}:
+            return
+
+        group = self._table_model.group_at(index.row())
+        if group is None:
+            return
+        self._show_filter_group_detail_dialog(group)
 
     def _show_table_context_menu(self, position: object) -> None:
         if self._table_model is None:
@@ -2515,6 +3358,21 @@ class MainWindow(QMainWindow):
 
         if self.table.selectionModel() is not None and not self.table.selectionModel().isSelected(index):
             self.table.selectRow(index.row())
+
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            group = self._table_model.group_at(index.row())
+            if group is None:
+                return
+            menu = QMenu(self)
+            open_action = menu.addAction("Visualizar contatos do grupo")
+            send_action = menu.addAction("Enviar grupos selecionados para a Planilha automatica")
+            send_action.setEnabled(bool(self._selected_table_guest_ids(selected_state=False)))
+            selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
+            if selected_action == open_action:
+                self._show_filter_group_detail_dialog(group)
+            elif selected_action == send_action:
+                self._send_highlighted_rows_to_automatic()
+            return
 
         menu = QMenu(self)
         row = self._table_model.row_at(index.row())
@@ -2543,6 +3401,487 @@ class MainWindow(QMainWindow):
             self._send_highlighted_rows_to_automatic()
         elif selected_action == remove_action:
             self._clear_highlighted_rows_from_automatic()
+
+    def _show_table_header_filter_menu(self, logical_column: int) -> None:
+        if self._table_model is None or logical_column < 0:
+            return
+        if self.table.horizontalHeader().isSectionHidden(logical_column):
+            return
+
+        column_identifier = self._table_model.column_identifier(logical_column)
+        if not column_identifier:
+            return
+
+        available_values = self._filter_values_for_table_column(logical_column, column_identifier)
+        active_values = set(self._active_table_column_value_filters().get(column_identifier, set()))
+        available_values.update(active_values)
+        values = sorted(available_values, key=self._filter_value_sort_key)
+        if not values:
+            values = [FILTER_EMPTY_VALUE_LABEL]
+
+        header_label = str(
+            self._table_model.headerData(
+                logical_column,
+                Qt.Orientation.Horizontal,
+                Qt.ItemDataRole.DisplayRole,
+            )
+            or ""
+        ).replace("\u25be", "").strip()
+
+        menu = QMenu(self)
+        container = QWidget(menu)
+        container.setMinimumWidth(320)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        label = QLabel(f"Filtrar {header_label}", container)
+        label.setObjectName("SmallLabel")
+        layout.addWidget(label)
+
+        search_input = QLineEdit(container)
+        search_input.setPlaceholderText("Buscar valor neste filtro")
+        layout.addWidget(search_input)
+
+        value_list = QListWidget(container)
+        value_list.setMinimumHeight(210)
+        value_list.setMaximumHeight(320)
+        checked_values = active_values or set(values)
+        for value in values:
+            item = QListWidgetItem(value)
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if value in checked_values
+                else Qt.CheckState.Unchecked
+            )
+            value_list.addItem(item)
+        layout.addWidget(value_list)
+
+        def apply_value_search() -> None:
+            search_text = self._normalize_dialog_text(search_input.text())
+            for item_index in range(value_list.count()):
+                item = value_list.item(item_index)
+                item_text = self._normalize_dialog_text(item.text())
+                item.setHidden(bool(search_text) and search_text not in item_text)
+
+        quick_buttons_layout = QHBoxLayout()
+        quick_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        quick_buttons_layout.setSpacing(8)
+        check_all_button = QPushButton("Marcar todos", container)
+        uncheck_all_button = QPushButton("Desmarcar todos", container)
+        quick_buttons_layout.addWidget(check_all_button)
+        quick_buttons_layout.addWidget(uncheck_all_button)
+        quick_buttons_layout.addStretch(1)
+        layout.addLayout(quick_buttons_layout)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(8)
+        clear_filter_button = QPushButton("Limpar filtro", container)
+        cancel_button = QPushButton("Cancelar", container)
+        apply_button = QPushButton("Aplicar", container)
+        apply_button.setDefault(True)
+        buttons_layout.addWidget(clear_filter_button)
+        buttons_layout.addStretch(1)
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(apply_button)
+        layout.addLayout(buttons_layout)
+
+        widget_action = QWidgetAction(menu)
+        widget_action.setDefaultWidget(container)
+        menu.addAction(widget_action)
+
+        check_all_button.clicked.connect(lambda: self._set_all_filter_value_items_checked(value_list, True))
+        uncheck_all_button.clicked.connect(lambda: self._set_all_filter_value_items_checked(value_list, False))
+        search_input.textChanged.connect(apply_value_search)
+        clear_filter_button.clicked.connect(lambda: self._clear_table_header_filter(column_identifier, menu))
+        cancel_button.clicked.connect(menu.close)
+        apply_button.clicked.connect(
+            lambda: self._apply_table_header_filter(column_identifier, values, value_list, menu)
+        )
+
+        header = self.table.horizontalHeader()
+        section_x = header.sectionViewportPosition(logical_column)
+        position = header.mapToGlobal(header.rect().topLeft())
+        position.setX(position.x() + max(section_x, 0))
+        position.setY(position.y() + header.height())
+        menu.exec(position)
+
+    def _filter_values_for_table_column(self, logical_column: int, column_identifier: str) -> set[str]:
+        values: set[str] = set()
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            for row_index in range(self._table_model.rowCount()):
+                group = self._table_model.group_at(row_index)
+                if group is None:
+                    continue
+                values.update(self._filter_values_for_group(group, column_identifier))
+            return values
+
+        if not isinstance(self._table_model, GuestTableModel):
+            return values
+
+        for row_index in range(self._table_model.rowCount()):
+            row = self._table_model.row_at(row_index)
+            if row is None:
+                continue
+            values.update(self._filter_values_for_row(row, column_identifier))
+        return values
+
+    def _filter_value_sort_key(self, value: str) -> tuple[int, str]:
+        return (1 if value == FILTER_EMPTY_VALUE_LABEL else 0, self._normalize_dialog_text(value))
+
+    def _set_all_filter_value_items_checked(self, value_list: QListWidget, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for index in range(value_list.count()):
+            item = value_list.item(index)
+            if item.isHidden():
+                continue
+            item.setCheckState(state)
+
+    def _clear_table_header_filter(self, column_identifier: str, menu: QMenu) -> None:
+        self._set_table_column_value_filter(column_identifier, None)
+        menu.close()
+        self._current_page = 0
+        self._load_table()
+
+    def _apply_table_header_filter(
+        self,
+        column_identifier: str,
+        all_values: list[str],
+        value_list: QListWidget,
+        menu: QMenu,
+    ) -> None:
+        selected_values = {
+            str(value_list.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(value_list.count())
+            if value_list.item(index).checkState() == Qt.CheckState.Checked
+        }
+        if not selected_values:
+            QMessageBox.information(
+                self,
+                "Filtro da coluna",
+                "Marque pelo menos um valor para aplicar o filtro.",
+            )
+            return
+
+        if selected_values == set(all_values):
+            self._set_table_column_value_filter(column_identifier, None)
+        else:
+            self._set_table_column_value_filter(column_identifier, selected_values)
+        menu.close()
+        self._marked_guest_ids.clear()
+        self._current_page = 0
+        self._load_table()
+
+    def _show_table_header_context_menu(self, position: object) -> None:
+        if self._table_model is None:
+            return
+        if self._is_grouped_filter_mode():
+            return
+
+        header = self.table.horizontalHeader()
+        logical_column = header.logicalIndexAt(position)
+        if logical_column < 0:
+            return
+
+        data_column = self._table_model.data_column_name(logical_column)
+        header_label = str(
+            self._table_model.headerData(
+                logical_column,
+                Qt.Orientation.Horizontal,
+                Qt.ItemDataRole.DisplayRole,
+            )
+            or ""
+        )
+
+        menu = QMenu(self)
+        column_identifier = self._table_model.column_identifier(logical_column)
+        can_hide_system_column = column_identifier == "system:duplicate"
+        if data_column is None and not can_hide_system_column:
+            hide_action = menu.addAction("Coluna fixa do sistema")
+            hide_action.setEnabled(False)
+        else:
+            hide_action = menu.addAction(f"Excluir coluna '{header_label}' da visualização")
+        restore_action = menu.addAction("Restaurar colunas ocultas")
+        restore_action.setEnabled(self._has_hidden_table_columns())
+
+        selected_action = menu.exec(header.mapToGlobal(position))
+        if data_column is not None and selected_action == hide_action:
+            self._hide_table_data_column(data_column, header_label)
+        elif can_hide_system_column and selected_action == hide_action:
+            self._hide_table_system_column(column_identifier, header_label)
+        elif selected_action == restore_action:
+            self._restore_hidden_table_columns()
+
+    def _hide_table_data_column(self, column_name: str, header_label: str) -> None:
+        if not self._available_columns:
+            return
+
+        context_key = self._column_filter_context_key()
+        visible_columns = self._visible_columns_for_current_context(self._available_columns)
+        if column_name not in visible_columns:
+            return
+        if len(visible_columns) <= 1:
+            QMessageBox.warning(
+                self,
+                "Coluna da tabela",
+                "A tabela precisa manter pelo menos uma coluna visível.",
+            )
+            return
+
+        visible_columns.discard(column_name)
+        self._visible_columns_by_context[context_key] = visible_columns
+        self.status_label.setText(f"Coluna '{header_label}' removida da visualização.")
+        self._load_table()
+
+    def _hide_table_system_column(self, column_identifier: str, header_label: str) -> None:
+        context_key = self._column_filter_context_key()
+        hidden_columns = set(self._hidden_system_columns_by_context.get(context_key, set()))
+        hidden_columns.add(column_identifier)
+        self._hidden_system_columns_by_context[context_key] = hidden_columns
+        self.status_label.setText(f"Coluna '{header_label}' removida da visualização.")
+        self._load_table()
+
+    def _restore_hidden_table_columns(self) -> None:
+        context_key = self._column_filter_context_key()
+        self._visible_columns_by_context.pop(context_key, None)
+        self._hidden_system_columns_by_context.pop(context_key, None)
+        self.status_label.setText("Colunas restauradas.")
+        self._load_table()
+
+    def _create_column(self) -> None:
+        if self._duplicates_mode:
+            QMessageBox.information(
+                self,
+                "Criar coluna",
+                "A visualização de possíveis repetidos é apenas para conferência.",
+            )
+            return
+        if not self._automatic_mode and self._current_workbook_id is None:
+            QMessageBox.information(
+                self,
+                "Criar coluna",
+                "Importe ou abra uma planilha antes de criar uma coluna.",
+            )
+            return
+
+        column_name, accepted = QInputDialog.getText(
+            self,
+            "Criar coluna",
+            "Nome da nova coluna:",
+        )
+        if not accepted:
+            return
+
+        clean_column_name = str(column_name or "").strip()
+        if not clean_column_name:
+            return
+
+        if self._visible_column_exists(clean_column_name):
+            QMessageBox.information(
+                self,
+                "Criar coluna",
+                f"A coluna '{clean_column_name}' já existe na tabela atual.",
+            )
+            return
+
+        context_key = self._column_filter_context_key()
+        try:
+            updated_lists = self._view_model.create_column(
+                clean_column_name,
+                import_id=None if self._automatic_mode else self._current_import_id,
+                workbook_id=None if self._automatic_mode else self._current_workbook_id,
+                automatic=self._automatic_mode,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Erro ao criar coluna", str(exc))
+            return
+
+        self._remember_forced_visible_column(context_key, clean_column_name)
+        if context_key in self._visible_columns_by_context:
+            self._visible_columns_by_context[context_key].add(clean_column_name)
+        self.status_label.setText(f"Coluna '{clean_column_name}' criada em {updated_lists} lista(s).")
+        self._load_table()
+
+    def _visible_column_exists(self, column_name: str) -> bool:
+        normalized_target = self._normalize_dialog_text(column_name)
+        visible_columns = set(self._available_columns)
+        if self._table_model is not None:
+            for logical_column in range(self._table_model.columnCount()):
+                data_column = self._table_model.data_column_name(logical_column)
+                if data_column:
+                    visible_columns.add(data_column)
+        return any(self._normalize_dialog_text(column) == normalized_target for column in visible_columns)
+
+    def _remember_forced_visible_column(self, context_key: str, column_name: str) -> None:
+        forced_columns = self._forced_visible_columns_by_context.setdefault(context_key, [])
+        if not any(
+            self._normalize_dialog_text(existing_column) == self._normalize_dialog_text(column_name)
+            for existing_column in forced_columns
+        ):
+            forced_columns.append(column_name)
+
+    def _include_forced_visible_columns(
+        self,
+        rows: list[GuestRowDTO],
+        columns: tuple[str, ...],
+        editable_columns: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        forced_columns = self._forced_visible_columns_by_context.get(self._column_filter_context_key(), [])
+        if not forced_columns:
+            return columns, editable_columns
+
+        next_columns = list(columns)
+        next_editable_columns = list(editable_columns)
+        normalized_columns = {self._normalize_dialog_text(column) for column in next_columns}
+        normalized_editable_columns = {self._normalize_dialog_text(column) for column in next_editable_columns}
+
+        for column_name in forced_columns:
+            normalized_column = self._normalize_dialog_text(column_name)
+            if normalized_column not in normalized_columns:
+                next_columns.append(column_name)
+                normalized_columns.add(normalized_column)
+            if normalized_column not in normalized_editable_columns:
+                next_editable_columns.append(column_name)
+                normalized_editable_columns.add(normalized_column)
+            for row in rows:
+                row.data.setdefault(column_name, "")
+
+        return tuple(next_columns), tuple(next_editable_columns)
+
+    def _order_columns_for_display(
+        self,
+        columns: tuple[str, ...],
+        editable_columns: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        ordered_columns = tuple(
+            sorted(
+                columns,
+                key=lambda column_name: self._column_display_sort_key(column_name, columns.index(column_name)),
+            )
+        )
+        editable_set = set(editable_columns)
+        ordered_editable_columns = tuple(
+            column_name
+            for column_name in ordered_columns
+            if column_name in editable_set
+        )
+        return ordered_columns, ordered_editable_columns
+
+    def _column_display_sort_key(self, column_name: str, original_index: int) -> tuple[int, int, str]:
+        normalized_column = self._normalize_dialog_text(column_name)
+        for priority_index, words in enumerate(COLUMN_DISPLAY_PRIORITY_WORDS):
+            if any(word and word in normalized_column for word in words):
+                return priority_index, original_index, normalized_column
+        return len(COLUMN_DISPLAY_PRIORITY_WORDS), original_index, normalized_column
+
+    def _apply_default_table_column_widths(self) -> None:
+        if self._table_model is None or self._is_grouped_filter_mode():
+            return
+
+        for logical_column in range(self._table_model.columnCount()):
+            data_column = self._table_model.data_column_name(logical_column)
+            if not data_column:
+                continue
+            width = self._default_data_column_width(data_column)
+            if width is not None:
+                self.table.setColumnWidth(logical_column, width)
+
+    def _default_data_column_width(self, column_name: str) -> int | None:
+        normalized_column = self._normalize_dialog_text(column_name)
+        width_rules = (
+            (("lista",), 150),
+            (("selecao",), 120),
+            (("tratamento",), 140),
+            (("nome", "name", "convidado", "pessoa", "cliente", "participante"), 230),
+            (("categoria", "category", "grupo", "tipo"), 170),
+            (("endereco", "address", "logradouro", "rua", "avenida"), 240),
+            (("edificio", "edif", "predio"), 220),
+            (("cep", "codigo postal", "postal code", "zip"), 110),
+            (("estado", "cidade", "uf", "city", "municipio"), 150),
+            (("telefone", "phone", "fone", "tel"), 140),
+            (("celular", "whatsapp", "mobile", "cell"), 140),
+            (("email", "e-mail", "mail"), 220),
+            (("obs", "observacao", "observacoes"), 220),
+        )
+        for words, width in width_rules:
+            if any(word and word in normalized_column for word in words):
+                return width
+        return 170
+
+    def _has_hidden_table_columns(self) -> bool:
+        context_key = self._column_filter_context_key()
+        return (
+            context_key in self._visible_columns_by_context
+            or bool(self._hidden_system_columns_by_context.get(context_key))
+        )
+
+    def _on_table_header_section_moved(
+        self,
+        logical_index: int,
+        old_visual_index: int,
+        new_visual_index: int,
+    ) -> None:
+        if self._restoring_table_header_layout or self._table_model is None or self._is_grouped_filter_mode():
+            return
+
+        header = self.table.horizontalHeader()
+        ordered_columns: list[str] = []
+        for visual_index in range(header.count()):
+            logical_column = header.logicalIndex(visual_index)
+            column_identifier = self._table_model.column_identifier(logical_column)
+            if column_identifier:
+                ordered_columns.append(column_identifier)
+
+        self._table_column_order_by_context[self._column_filter_context_key()] = ordered_columns
+
+    def _restore_table_header_layout(self) -> None:
+        if self._table_model is None:
+            return
+
+        saved_order = self._table_column_order_by_context.get(self._column_filter_context_key())
+        if not saved_order:
+            return
+
+        current_identifiers = {
+            self._table_model.column_identifier(logical_column): logical_column
+            for logical_column in range(self._table_model.columnCount())
+        }
+        desired_order = [
+            column_identifier
+            for column_identifier in saved_order
+            if column_identifier in current_identifiers
+        ]
+        desired_order.extend(
+            column_identifier
+            for column_identifier in current_identifiers
+            if column_identifier not in desired_order
+        )
+
+        header = self.table.horizontalHeader()
+        self._restoring_table_header_layout = True
+        try:
+            for target_visual_index, column_identifier in enumerate(desired_order):
+                logical_column = current_identifiers[column_identifier]
+                current_visual_index = header.visualIndex(logical_column)
+                if current_visual_index != target_visual_index:
+                    header.moveSection(current_visual_index, target_visual_index)
+        finally:
+            self._restoring_table_header_layout = False
+
+    def _apply_hidden_system_columns(self) -> None:
+        if self._table_model is None:
+            return
+
+        hidden_columns = self._hidden_system_columns_by_context.get(self._column_filter_context_key(), set())
+        for logical_column in range(self._table_model.columnCount()):
+            column_identifier = self._table_model.column_identifier(logical_column)
+            should_hide = column_identifier in hidden_columns
+            if column_identifier == "system:duplicate" and not self._duplicates_mode:
+                should_hide = True
+            self.table.setColumnHidden(logical_column, should_hide)
 
     def _send_highlighted_rows_to_automatic(self) -> None:
         if self._table_model is None:
@@ -2634,6 +3973,20 @@ class MainWindow(QMainWindow):
         row_indexes = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
         guest_ids: list[int] = []
         seen: set[int] = set()
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            for row_index in row_indexes:
+                group = self._table_model.group_at(row_index)
+                if group is None:
+                    continue
+                for row in group.rows:
+                    if row.id in seen or not row.selectable:
+                        continue
+                    if selected_state is not None and row.selected != selected_state:
+                        continue
+                    guest_ids.append(row.id)
+                    seen.add(row.id)
+            return guest_ids
+
         for row_index in row_indexes:
             row = self._table_model.row_at(row_index)
             if row is None or not row.selectable or row.id in seen:
@@ -2646,6 +3999,24 @@ class MainWindow(QMainWindow):
 
     def _set_page_selection(self, selected: bool) -> None:
         if self._table_model is None:
+            return
+
+        if isinstance(self._table_model, GroupedGuestTableModel):
+            grouped_guest_ids = {
+                row.id
+                for group in self._grouped_filter_groups_by_key.values()
+                for row in group.rows
+            }
+            if selected:
+                self._marked_filter_group_keys = set(self._grouped_filter_groups_by_key)
+                self._rebuild_group_marked_guest_ids()
+                self.status_label.setText(f"{len(self._marked_guest_ids)} registros marcados nesta pagina.")
+            else:
+                self._marked_filter_group_keys.clear()
+                self._marked_guest_ids.difference_update(grouped_guest_ids)
+                self.status_label.setText("Marcacoes do resumo removidas.")
+            self._table_model.refresh_selection_states()
+            self._update_actions()
             return
 
         if selected and not self._automatic_mode and not self._duplicates_mode:
@@ -3106,6 +4477,7 @@ class MainWindow(QMainWindow):
             self.sheet_tabs,
             self.filter_button,
             self.column_filter_button,
+            self.create_column_button,
             self.search_input,
             self.clear_search_button,
             self.table_send_button,
@@ -3123,6 +4495,7 @@ class MainWindow(QMainWindow):
     def _update_actions(self) -> None:
         has_workbook = self._current_workbook_id is not None
         has_workspace = has_workbook or self._automatic_mode or self._duplicates_mode
+        grouped_filter_mode = self._is_grouped_filter_mode()
         can_select = (
             has_workbook
             and self._current_sheet_selectable
@@ -3133,7 +4506,12 @@ class MainWindow(QMainWindow):
         has_next = self._total_rows > (self._current_page + 1) * max(self._page_size, 1)
 
         self.filter_button.setEnabled(has_workspace)
-        self.column_filter_button.setEnabled(has_workspace and bool(self._available_columns))
+        self.column_filter_button.setEnabled(
+            has_workspace and bool(self._available_columns) and not grouped_filter_mode
+        )
+        self.create_column_button.setEnabled(
+            has_workspace and not self._duplicates_mode and not grouped_filter_mode
+        )
         self.search_input.setEnabled(has_workspace)
         self.clear_search_button.setEnabled(has_workspace and bool(self.search_input.text().strip()))
         self.options_button.setEnabled(has_workspace)
@@ -3141,11 +4519,14 @@ class MainWindow(QMainWindow):
         self.table_send_button.setVisible(can_select)
         self.table_send_button.setEnabled(can_select and bool(self._marked_guest_ids))
         self.select_page_button.setEnabled(can_select)
-        self.clear_page_button.setEnabled(
-            can_select
-            and self._table_model is not None
-            and bool(self._table_model.guest_ids())
-        )
+        if grouped_filter_mode:
+            self.clear_page_button.setEnabled(can_select and bool(self._marked_guest_ids))
+        else:
+            self.clear_page_button.setEnabled(
+                can_select
+                and self._table_model is not None
+                and bool(self._table_model.guest_ids())
+            )
         self.first_page_button.setEnabled(self._current_page > 0)
         self.previous_page_button.setEnabled(self._current_page > 0)
         self.next_page_button.setEnabled(has_next)

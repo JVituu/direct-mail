@@ -18,6 +18,18 @@ AUTOMATIC_SHEET_NAME_KEY = "automatic_sheet_name"
 DEFAULT_AUTOMATIC_SHEET_NAME = "Planilha automática"
 MIN_VERIFICATION_CODE = 10_000_000
 MAX_VERIFICATION_CODE = 99_999_999
+CONTACT_STATUS_COLUMNS = {
+    "phone": "phone_contact_status",
+    "mobile": "mobile_contact_status",
+    "email": "email_contact_status",
+}
+CONTACT_STATUS_CHANNEL_COLUMNS = {
+    "call": ("phone_contact_status", "mobile_contact_status"),
+    "phone": ("phone_contact_status",),
+    "mobile": ("mobile_contact_status",),
+    "email": ("email_contact_status",),
+}
+CONTACT_STATUS_VALUES = {"", "done", "missed", "not_done"}
 NAME_HEADER_WORDS = {
     "nome",
     "name",
@@ -112,6 +124,9 @@ class SqliteGuestRepository:
                     columns_json TEXT NOT NULL DEFAULT '[]',
                     data_json TEXT NOT NULL,
                     invitation_status TEXT NOT NULL DEFAULT 'pending',
+                    phone_contact_status TEXT NOT NULL DEFAULT '',
+                    mobile_contact_status TEXT NOT NULL DEFAULT '',
+                    email_contact_status TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
 
@@ -801,6 +816,9 @@ class SqliteGuestRepository:
                 automatic_guests.verification_code,
                 automatic_guests.data_json,
                 automatic_guests.invitation_status,
+                automatic_guests.phone_contact_status,
+                automatic_guests.mobile_contact_status,
+                automatic_guests.email_contact_status,
                 1 AS selected
             FROM automatic_guests
             WHERE 1 = 1
@@ -888,6 +906,9 @@ class SqliteGuestRepository:
                     automatic_guests.verification_code,
                     automatic_guests.data_json,
                     automatic_guests.invitation_status,
+                    automatic_guests.phone_contact_status,
+                    automatic_guests.mobile_contact_status,
+                    automatic_guests.email_contact_status,
                     1 AS selected
                 FROM automatic_guests
                 JOIN imports ON imports.id = automatic_guests.source_import_id
@@ -975,9 +996,24 @@ class SqliteGuestRepository:
                 (columns, json.dumps(data, ensure_ascii=False), source_guest_id),
             )
 
+    def add_guest_column(
+        self,
+        column_name: str,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+        automatic: bool = False,
+    ) -> int:
+        clean_column_name = str(column_name or "").strip()
+        if not clean_column_name:
+            return 0
+
+        if automatic:
+            return self._add_automatic_guest_column(clean_column_name, import_id, workbook_id)
+        return self._add_import_guest_column(clean_column_name, import_id, workbook_id)
+
     def set_automatic_guest_status(self, source_guest_id: int, status: str) -> None:
         clean_status = str(status or "").strip().casefold()
-        if clean_status not in {"sent", "waiting", "pending"}:
+        if clean_status not in {"sent", "waiting", "not_sent", "pending"}:
             raise ValueError("Status de convite invÃ¡lido.")
 
         with connect(self._database_path) as connection:
@@ -991,6 +1027,29 @@ class SqliteGuestRepository:
             )
             if cursor.rowcount == 0:
                 raise ValueError("Registro nÃ£o encontrado na Planilha automÃ¡tica.")
+
+    def set_automatic_contact_status(self, source_guest_id: int, channel: str, status: str) -> None:
+        clean_channel = str(channel or "").strip().casefold()
+        column_names = CONTACT_STATUS_CHANNEL_COLUMNS.get(clean_channel)
+        if column_names is None:
+            raise ValueError("Canal de contato inválido.")
+
+        clean_status = str(status or "").strip().casefold()
+        if clean_status not in CONTACT_STATUS_VALUES:
+            raise ValueError("Status de contato inválido.")
+
+        assignments = ", ".join(f"{column_name} = ?" for column_name in column_names)
+        with connect(self._database_path) as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE automatic_guests
+                SET {assignments}
+                WHERE source_guest_id = ?
+                """,
+                (*([clean_status] * len(column_names)), source_guest_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Registro não encontrado na Planilha automática.")
 
     def set_guests_selected(
         self,
@@ -1118,6 +1177,9 @@ class SqliteGuestRepository:
                 automatic_guests.verification_code,
                 automatic_guests.data_json,
                 automatic_guests.invitation_status,
+                automatic_guests.phone_contact_status,
+                automatic_guests.mobile_contact_status,
+                automatic_guests.email_contact_status,
                 1 AS selected
             FROM automatic_guests
             WHERE 1 = 1
@@ -1634,6 +1696,65 @@ class SqliteGuestRepository:
             (columns_json, import_id),
         )
 
+    def _add_import_guest_column(
+        self,
+        column_name: str,
+        import_id: int | None,
+        workbook_id: int | None,
+    ) -> int:
+        query = "SELECT id, columns_json FROM imports WHERE is_selectable = 1"
+        params: list[object] = []
+        if import_id is not None:
+            query += " AND id = ?"
+            params.append(import_id)
+        elif workbook_id is not None:
+            query += " AND workbook_id = ?"
+            params.append(workbook_id)
+
+        with connect(self._database_path) as connection:
+            rows = connection.execute(query, params).fetchall()
+            if not rows and workbook_id is not None and import_id is None:
+                rows = connection.execute(
+                    "SELECT id, columns_json FROM imports WHERE workbook_id = ?",
+                    (workbook_id,),
+                ).fetchall()
+
+            for row in rows:
+                columns_json = self._append_column_to_json(row["columns_json"], column_name)
+                connection.execute(
+                    "UPDATE imports SET columns_json = ? WHERE id = ?",
+                    (columns_json, int(row["id"])),
+                )
+            return len(rows)
+
+    def _add_automatic_guest_column(
+        self,
+        column_name: str,
+        import_id: int | None,
+        workbook_id: int | None,
+    ) -> int:
+        query = """
+            SELECT source_guest_id, columns_json
+            FROM automatic_guests
+            WHERE 1 = 1
+        """
+        params: list[object] = []
+        query, params = self._apply_automatic_guest_filters(query, params, import_id, workbook_id)
+
+        with connect(self._database_path) as connection:
+            rows = connection.execute(query, params).fetchall()
+            for row in rows:
+                columns_json = self._append_column_to_json(row["columns_json"], column_name)
+                connection.execute(
+                    """
+                    UPDATE automatic_guests
+                    SET columns_json = ?
+                    WHERE source_guest_id = ?
+                    """,
+                    (columns_json, int(row["source_guest_id"])),
+                )
+            return len(rows)
+
     def _append_column_to_json(self, columns_json: object, column_name: str) -> str:
         try:
             columns = json.loads(str(columns_json))
@@ -1715,6 +1836,10 @@ class SqliteGuestRepository:
             connection.execute(
                 "ALTER TABLE automatic_guests ADD COLUMN invitation_status TEXT NOT NULL DEFAULT 'pending'"
             )
+        automatic_columns = self._table_columns(connection, "automatic_guests")
+        for column_name in CONTACT_STATUS_COLUMNS.values():
+            if column_name not in automatic_columns:
+                connection.execute(f"ALTER TABLE automatic_guests ADD COLUMN {column_name} TEXT NOT NULL DEFAULT ''")
         workbook_columns = self._table_columns(connection, "workbooks")
         if "display_name" not in workbook_columns:
             connection.execute("ALTER TABLE workbooks ADD COLUMN display_name TEXT")
@@ -1773,6 +1898,21 @@ class SqliteGuestRepository:
             if "invitation_status" in columns
             else "'pending'"
         )
+        phone_contact_status_expr = (
+            "automatic_guests.phone_contact_status"
+            if "phone_contact_status" in columns
+            else "''"
+        )
+        mobile_contact_status_expr = (
+            "automatic_guests.mobile_contact_status"
+            if "mobile_contact_status" in columns
+            else "''"
+        )
+        email_contact_status_expr = (
+            "automatic_guests.email_contact_status"
+            if "email_contact_status" in columns
+            else "''"
+        )
         created_at_expr = (
             "automatic_guests.created_at"
             if "created_at" in columns
@@ -1793,6 +1933,9 @@ class SqliteGuestRepository:
                 columns_json TEXT NOT NULL DEFAULT '[]',
                 data_json TEXT NOT NULL,
                 invitation_status TEXT NOT NULL DEFAULT 'pending',
+                phone_contact_status TEXT NOT NULL DEFAULT '',
+                mobile_contact_status TEXT NOT NULL DEFAULT '',
+                email_contact_status TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
             """
@@ -1809,6 +1952,9 @@ class SqliteGuestRepository:
                 columns_json,
                 data_json,
                 invitation_status,
+                phone_contact_status,
+                mobile_contact_status,
+                email_contact_status,
                 created_at
             )
             SELECT
@@ -1821,6 +1967,9 @@ class SqliteGuestRepository:
                 COALESCE(NULLIF({columns_json_expr}, ''), imports.columns_json, '[]'),
                 COALESCE({data_json_expr}, guests.data_json, '{{}}'),
                 COALESCE(NULLIF({invitation_status_expr}, ''), 'pending'),
+                COALESCE({phone_contact_status_expr}, ''),
+                COALESCE({mobile_contact_status_expr}, ''),
+                COALESCE({email_contact_status_expr}, ''),
                 COALESCE({created_at_expr}, datetime('now'))
             FROM automatic_guests_legacy AS automatic_guests
             LEFT JOIN guests ON guests.id = automatic_guests.source_guest_id
@@ -2118,6 +2267,11 @@ class SqliteGuestRepository:
         invitation_status = "pending"
         if "invitation_status" in row_keys and row["invitation_status"]:
             invitation_status = str(row["invitation_status"])
+        contact_statuses = {
+            "phone": str(row["phone_contact_status"] or "") if "phone_contact_status" in row_keys else "",
+            "mobile": str(row["mobile_contact_status"] or "") if "mobile_contact_status" in row_keys else "",
+            "email": str(row["email_contact_status"] or "") if "email_contact_status" in row_keys else "",
+        }
         return GuestRecord(
             id=int(row["id"]),
             import_id=int(row["import_id"]),
@@ -2128,4 +2282,5 @@ class SqliteGuestRepository:
             selected=bool(row["selected"]),
             selectable=bool(row["is_selectable"]),
             invitation_status=invitation_status,
+            contact_statuses=contact_statuses,
         )

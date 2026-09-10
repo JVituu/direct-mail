@@ -12,6 +12,7 @@ from app.application.dtos.guest_dto import (
     WorkbookSummaryDTO,
 )
 from app.application.use_cases.consolidate_imported_data import ConsolidateImportedDataUseCase
+from app.application.use_cases.create_guest_column import CreateGuestColumnUseCase
 from app.application.use_cases.delete_workbook import DeleteWorkbookUseCase
 from app.application.use_cases.export_selected_guests import ExportSelectedGuestsUseCase
 from app.application.use_cases.import_spreadsheet import ImportSpreadsheetUseCase
@@ -48,6 +49,7 @@ class MainViewModel:
         self._list_guests = ListGuestsUseCase(guest_repository)
         self._list_filter_options = ListGuestFilterOptionsUseCase(guest_repository)
         self._consolidate_imported_data = ConsolidateImportedDataUseCase(guest_repository)
+        self._create_guest_column = CreateGuestColumnUseCase(guest_repository)
         self._update_guest_data = UpdateGuestDataUseCase(guest_repository)
         self._update_selection = UpdateGuestSelectionUseCase(guest_repository)
         self._delete_workbook = DeleteWorkbookUseCase(guest_repository)
@@ -61,6 +63,10 @@ class MainViewModel:
             exporter=selected_guests_exporter,
         )
 
+    def _clear_table_cache(self) -> None:
+        self._list_guests.clear_cache()
+        self._list_filter_options.clear_cache()
+
     def initialize(self) -> None:
         self._guest_repository.initialize()
 
@@ -73,11 +79,13 @@ class MainViewModel:
         sheet_name: str,
         progress_callback: Callable[[str, int], None] | None = None,
     ) -> ImportResultDTO:
-        return self._import_spreadsheet.execute(
+        result = self._import_spreadsheet.execute(
             file_path=file_path,
             sheet_name=sheet_name,
             progress_callback=progress_callback,
         )
+        self._clear_table_cache()
+        return result
 
     def import_workbook(
         self,
@@ -91,6 +99,7 @@ class MainViewModel:
             progress_callback=progress_callback,
         )
         consolidation = self._consolidate_imported_data.execute()
+        self._clear_table_cache()
         return replace(
             result,
             workbook_id=consolidation.workbook_id or result.workbook_id,
@@ -140,9 +149,13 @@ class MainViewModel:
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         self._update_selection.set_guest_selected(guest_id, selected)
+        self._clear_table_cache()
 
     def set_automatic_guest_status(self, guest_id: int, status: str) -> None:
         self._update_selection.set_automatic_guest_status(guest_id, status)
+
+    def set_automatic_contact_status(self, guest_id: int, channel: str, status: str) -> None:
+        self._update_selection.set_automatic_contact_status(guest_id, channel, status)
 
     def list_duplicate_candidates(self, guest_id: int) -> list[GuestRowDTO]:
         return self._review_duplicate_selection.list_duplicate_candidates(guest_id)
@@ -158,9 +171,28 @@ class MainViewModel:
         automatic: bool = False,
     ) -> None:
         self._update_guest_data.execute(guest_id, column_name, value, automatic=automatic)
+        self._clear_table_cache()
+
+    def create_column(
+        self,
+        column_name: str,
+        import_id: int | None = None,
+        workbook_id: int | None = None,
+        automatic: bool = False,
+    ) -> int:
+        updated_lists = self._create_guest_column.execute(
+            column_name=column_name,
+            import_id=import_id,
+            workbook_id=workbook_id,
+            automatic=automatic,
+        )
+        self._clear_table_cache()
+        return updated_lists
 
     def set_page_selected(self, guest_ids: Sequence[int], selected: bool) -> int:
-        return self._update_selection.set_page_selected(guest_ids, selected)
+        updated_rows = self._update_selection.set_page_selected(guest_ids, selected)
+        self._clear_table_cache()
+        return updated_rows
 
     def set_all_filtered_selected(
         self,
@@ -169,22 +201,27 @@ class MainViewModel:
         selected: bool,
         search: str = "",
     ) -> int:
-        return self._update_selection.set_all_filtered_selected(
+        updated_rows = self._update_selection.set_all_filtered_selected(
             import_id=import_id,
             workbook_id=workbook_id,
             selected=selected,
             search=search,
         )
+        self._clear_table_cache()
+        return updated_rows
 
     def delete_workbook(self, workbook_id: int) -> None:
         self._delete_workbook.execute(workbook_id)
+        self._clear_table_cache()
 
     def merge_workbooks(
         self,
         source_workbook_id: int,
         target_workbook_id: int,
     ) -> WorkbookMergeResultDTO:
-        return self._merge_workbooks.execute(source_workbook_id, target_workbook_id)
+        result = self._merge_workbooks.execute(source_workbook_id, target_workbook_id)
+        self._clear_table_cache()
+        return result
 
     def rename_workbook(self, workbook_id: int, display_name: str) -> None:
         self._rename_workbook.execute(workbook_id, display_name)
@@ -194,7 +231,9 @@ class MainViewModel:
         values: dict[str, object],
         workbook_id: int | None = None,
     ) -> ImportResultDTO:
-        return self._register_guest.execute(values=values, workbook_id=workbook_id)
+        result = self._register_guest.execute(values=values, workbook_id=workbook_id)
+        self._clear_table_cache()
+        return result
 
     def automatic_sheet_name(self) -> str:
         return self._manage_automatic_sheet.get_name()
@@ -203,7 +242,9 @@ class MainViewModel:
         self._manage_automatic_sheet.rename(display_name)
 
     def clear_automatic_sheet(self) -> int:
-        return self._manage_automatic_sheet.clear()
+        selected_rows = self._manage_automatic_sheet.clear()
+        self._clear_table_cache()
+        return selected_rows
 
     def export_selected(
         self,

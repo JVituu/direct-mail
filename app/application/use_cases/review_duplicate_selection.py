@@ -34,4 +34,5 @@ class ReviewDuplicateSelectionUseCase:
             duplicate_reason=guest.duplicate_reason,
             duplicate_count=guest.duplicate_count,
             invitation_status=guest.invitation_status,
+            contact_statuses=dict(guest.contact_statuses),
         )

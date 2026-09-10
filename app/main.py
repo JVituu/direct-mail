@@ -58,8 +58,27 @@ def build_view_model() -> MainViewModel:
     return view_model
 
 
+def smoke_test() -> int:
+    ensure_project_root_on_path()
+    icon_path = resource_path(APP_ICON_PATH)
+    if not icon_path.exists():
+        raise RuntimeError(f"Icone do aplicativo nao encontrado: {icon_path}")
+
+    view_model = build_view_model()
+    if not view_model.automatic_sheet_name():
+        raise RuntimeError("Nome da Planilha automatica nao carregado.")
+    return 0
+
+
 def main() -> int:
     ensure_project_root_on_path()
+    if "--smoke-test" in sys.argv:
+        try:
+            return smoke_test()
+        except Exception as exc:
+            print(f"Smoke test falhou: {exc}", file=sys.stderr)
+            return 1
+
     configure_windows_app_id()
     app = QApplication(sys.argv)
     app_icon = QIcon(str(resource_path(APP_ICON_PATH)))

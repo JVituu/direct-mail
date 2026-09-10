@@ -16,6 +16,10 @@ OPTIONS_PAGE_SIZE = 5000
 class ListGuestFilterOptionsUseCase:
     def __init__(self, guest_repository: GuestRepository) -> None:
         self._guest_repository = guest_repository
+        self._options_cache: dict[tuple[object, ...], GuestFilterOptionsDTO] = {}
+
+    def clear_cache(self) -> None:
+        self._options_cache.clear()
 
     def execute(
         self,
@@ -25,6 +29,11 @@ class ListGuestFilterOptionsUseCase:
         duplicates_only: bool = False,
     ) -> GuestFilterOptionsDTO:
         columns = self._guest_repository.get_columns(import_id, workbook_id)
+        cache_key = (import_id, workbook_id, selected_only, duplicates_only, columns)
+        cached_options = self._options_cache.get(cache_key)
+        if cached_options is not None:
+            return cached_options
+
         cleaner = ContactDataCleaner(columns)
         category_columns = self._matching_columns(columns, CATEGORY_HEADER_WORDS)
         city_columns = self._matching_columns(columns, CITY_HEADER_WORDS)
@@ -42,10 +51,12 @@ class ListGuestFilterOptionsUseCase:
             if location:
                 locations.add(location)
 
-        return GuestFilterOptionsDTO(
+        options = GuestFilterOptionsDTO(
             categories=tuple(sorted(categories, key=str.casefold)),
             locations=tuple(sorted(locations, key=str.casefold)),
         )
+        self._options_cache[cache_key] = options
+        return options
 
     def _iter_context_guests(
         self,
